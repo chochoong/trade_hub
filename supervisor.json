@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "슈퍼바이저 설정. 에이전트 키는 각 에이전트가 agent_runs.agent에 남기는 이름과 같아야 합니다 (db/schema.sql 참고).",
+    "슈퍼바이저 설정. 에이전트 키는 각 에이전트가 agent_runs.agent에 남기는 이름과 같아야 합니다 (trade_hub/schema.sql 참고).",
     "command: 실행 명령 (리스트). {python}은 슈퍼바이저를 실행한 파이썬으로 바뀝니다. cwd: 실행 폴더 (이 파일 기준 상대경로 가능).",
     "실행 조건 (둘 중 하나라도 맞으면 실행): every_hours = 마지막 실행 후 N시간 경과 / when_sql = 결과가 1 이상 (처리할 일이 있음).",
     "when_sql로 실행할 때는 min_interval_hours 안에 다시 실행하지 않습니다. 실행 중이거나 timeout_minutes 안에 시작된 실행이 있으면 건너뜁니다.",
@@ -58,7 +58,12 @@
     "enabled": true,
     "every_hours": 20,
     "provider": null,
-    "model": null
+    "model": null,
+    "decision_expire_days": 7
+  },
+  "backup": {
+    "enabled": true,
+    "keep": 14
   },
   "alerts": {
     "task_stale_days": 3,

@@ -13,6 +13,7 @@
   python supervisor.py schedule        # 스케줄러만
   python supervisor.py review          # 검토관만 (지금 바로)
   python supervisor.py review --no-llm # LLM 없이 규칙 기반 경고만
+  python supervisor.py backup          # 공용 DB 백업 (tick에서 하루 1번 자동)
 
 사람이 공용 DB를 보고 다루는 명령은 trade_hub (python -m trade_hub.cli) 참고.
 """
@@ -38,6 +39,7 @@ def load_config(path=CONFIG_PATH):
     cfg.setdefault("agents", {})
     cfg.setdefault("review", {})
     cfg.setdefault("alerts", {})
+    cfg.setdefault("backup", {})
     return cfg
 
 
@@ -180,10 +182,10 @@ def snapshot(conn):
             ORDER BY ps.est_margin_pct LIMIT 10"""),
         "recent_runs": rows(conn, """
             SELECT id, agent, status, started_at, finished_at, substr(error, 1, 200) AS error FROM agent_runs
-            WHERE started_at > datetime('now', 'localtime', '-7 days') ORDER BY id DESC LIMIT 30"""),
+            WHERE started_at > strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime', '-7 days') ORDER BY id DESC LIMIT 30"""),
         "recent_dispatches": rows(conn, """
             SELECT agent, reason, exit_code, started_at, finished_at, log_path FROM supervisor_dispatches
-            WHERE started_at > datetime('now', 'localtime', '-7 days') ORDER BY id DESC LIMIT 20"""),
+            WHERE started_at > strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime', '-7 days') ORDER BY id DESC LIMIT 20"""),
         "pnl": rows(conn, "SELECT * FROM v_product_pnl WHERE revenue_krw <> 0 OR cost_krw <> 0"),
     }
 
@@ -243,6 +245,7 @@ REVIEW_SYSTEM = """당신은 1인 수입 무역 에이전트 파이프라인의 
 - 주어진 DB 요약과 규칙 경고에 있는 사실만 사용합니다. 없는 수치나 사건을 만들지 않습니다.
 - 당신은 읽기 전용입니다. 메일 발송·결제·단계 변경을 직접 하지 않고, 사람에게 '결정할 일'을 제안만 합니다.
 - 단계를 넘나드는 판단을 우선합니다 (예: 견적 기준 마진이 처음 추정보다 크게 낮음, 고득점 후보가 방치됨, 같은 에이전트가 반복 실패).
+- pending_tasks에 이미 같은 취지의 할 일이 있으면 새로 제안하지 않습니다 (표현만 바꾼 중복 금지). 새로 결정할 것이 없으면 suggestions는 빈 목록입니다.
 - 짧고 구체적으로. 품목은 이름과 번호로 지칭합니다.
 - 결과는 반드시 submit_briefing 도구로 제출합니다."""
 
@@ -306,6 +309,9 @@ def review(conn, cfg, run_id, use_llm=True, log=print):
 
     valid_ids = {r[0] for r in conn.execute("SELECT id FROM products")}
     with conn:
+        expired = expire_decisions(conn, cfg["review"].get("decision_expire_days", 7))
+        if expired:
+            log(f"  · 오래된 검토관 제안 {expired}건 자동 기각")
         bid = conn.execute(
             "INSERT INTO briefings (run_id, summary, alerts_json, source_runs_json) VALUES (?, ?, ?, ?)",
             (run_id, summary, trade_db.dumps(alerts), trade_db.dumps([r["id"] for r in snap["recent_runs"]]))
@@ -315,6 +321,30 @@ def review(conn, cfg, run_id, use_llm=True, log=print):
             trade_db.add_task(conn, "decision", s["title"], product_id=pid, run_id=run_id,
                               detail=s["detail"], priority=int(s["priority"]))
     return bid, summary, alerts, suggestions
+
+
+def expire_decisions(conn, days, now=None):
+    """검토관이 만든 결정할 일 중 days일 넘게 대기 중인 것을 dismissed로 바꾼다 (승인 대기함이 쌓이지 않게).
+    사람이나 다른 에이전트가 만든 할 일은 건드리지 않는다. 바꾼 건수를 돌려준다."""
+    if not days:
+        return 0
+    now = now or datetime.now()
+    cutoff = (now - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S")
+    return conn.execute(
+        "UPDATE tasks SET status = 'dismissed', done_at = ? WHERE kind = 'decision' AND status = 'pending'"
+        " AND created_at < ? AND run_id IN (SELECT id FROM agent_runs WHERE agent = 'supervisor')",
+        (now.strftime("%Y-%m-%dT%H:%M:%S"), cutoff)).rowcount
+
+
+def run_backup(conn, cfg, log=print):
+    """설정에 따라 하루 1번 DB를 백업한다."""
+    b = cfg.get("backup", {})
+    if not b.get("enabled", True):
+        return None
+    made = trade_db.backup(conn, b.get("dir") and (ROOT / b["dir"]), keep=b.get("keep", 14))
+    if made:
+        log(f"  · DB 백업: {made}")
+    return made
 
 
 def review_due(conn, cfg, now):
@@ -357,7 +387,7 @@ def main():
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description="슈퍼바이저 (스케줄러 + 검토관)")
-    ap.add_argument("cmd", nargs="?", default="status", choices=["status", "tick", "schedule", "review"])
+    ap.add_argument("cmd", nargs="?", default="status", choices=["status", "tick", "schedule", "review", "backup"])
     ap.add_argument("--dry-run", action="store_true", help="에이전트를 실행하지 않고 실행 예정만 표시")
     ap.add_argument("--no-llm", action="store_true", help="검토관이 LLM 없이 규칙 기반 경고만 남김")
     ap.add_argument("--no-review", action="store_true", help="tick에서 검토를 건너뜀")
@@ -372,6 +402,11 @@ def main():
     if args.cmd == "status":
         show_status(conn, cfg)
         return
+    if args.cmd == "backup":
+        made = trade_db.backup(conn, cfg["backup"].get("dir") and (ROOT / cfg["backup"]["dir"]),
+                               keep=cfg["backup"].get("keep", 14))
+        print(f"✓ 백업: {made}" if made else "· 오늘 백업이 이미 있습니다")
+        return
     if args.dry_run:
         print("▶ 스케줄 (dry-run)")
         schedule(conn, cfg, dry_run=True)
@@ -380,6 +415,8 @@ def main():
         return
 
     with trade_db.agent_run(conn, "supervisor", args={"cmd": args.cmd, "no_llm": args.no_llm}) as run:
+        if args.cmd == "tick":
+            run_backup(conn, cfg)     # 에이전트 실행 전에 하루 1번
         if args.cmd in ("tick", "schedule"):
             print("▶ 스케줄")
             schedule(conn, cfg, run.id)

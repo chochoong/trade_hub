@@ -68,7 +68,12 @@ class Run:
 
 @contextmanager
 def agent_run(conn, agent, provider=None, model=None, args=None):
-    """with agent_run(conn, "discover", ...) as run: ...  → 성공/실패를 agent_runs에 기록한다."""
+    """with agent_run(conn, "discover", ...) as run: ...  → 성공/실패를 agent_runs에 기록한다.
+
+    블록 안의 쓰기는 `with conn:`으로 짧게 나눠 커밋할 것. 커밋하지 않은 채 LLM 호출 등을 기다리면
+    그동안 DB 쓰기 잠금이 잡혀 다른 에이전트·CLI가 'database is locked'로 실패한다.
+    실패(예외)로 끝나면 커밋하지 않은 쓰기는 버리고(rollback) 실패만 기록한다.
+    """
     if agent not in AGENTS:
         raise ValueError(f"알 수 없는 에이전트 이름: {agent!r} (가능: {', '.join(AGENTS)})")
     with conn:
@@ -78,6 +83,7 @@ def agent_run(conn, agent, provider=None, model=None, args=None):
     try:
         yield run
     except BaseException as e:   # SystemExit·Ctrl+C 포함 → 실패로 남기고 그대로 전파
+        conn.rollback()          # 실패한 실행의 커밋 안 된 쓰기는 반영하지 않음
         with conn:
             conn.execute("UPDATE agent_runs SET status='failed', error=?, report_dir=?, finished_at=? WHERE id=?",
                          (f"{type(e).__name__}: {e}"[:2000], run.report_dir, now(), run.id))
@@ -131,7 +137,12 @@ def set_stage(conn, product_id, stage, run_id=None, note=None):
 
 def advance_stage(conn, product_id, stage, run_id=None, note=None):
     """앞 단계로만 이동한다 (이미 더 진행됐거나 종료·중단된 품목은 그대로). 에이전트용."""
-    cur = conn.execute("SELECT stage FROM products WHERE id = ?", (product_id,)).fetchone()["stage"]
+    if stage not in STAGES:
+        raise ValueError(f"알 수 없는 단계: {stage!r} (가능: {', '.join(STAGES)})")
+    row = conn.execute("SELECT stage FROM products WHERE id = ?", (product_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"품목 번호 {product_id}가 없습니다")
+    cur = row["stage"]
     if cur in TERMINAL_STAGES or STAGES.index(cur) >= STAGES.index(stage):
         return False
     return set_stage(conn, product_id, stage, run_id, note)
@@ -152,6 +163,27 @@ def add_task(conn, kind, title, product_id=None, run_id=None, ref_table=None, re
         "INSERT INTO tasks (product_id, run_id, kind, ref_table, ref_id, title, detail, priority, due_date)"
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (product_id, run_id, kind, ref_table, ref_id, title, detail, priority, due_date)).lastrowid
+
+
+def backup(conn, backup_dir=None, keep=14, today=None):
+    """하루 1개씩 DB 백업 파일(trade_YYYYMMDD.db)을 만들고 오래된 것은 keep개만 남긴다.
+    오늘 백업이 이미 있으면 아무것도 하지 않는다. 만든 파일 경로(없으면 None)를 돌려준다."""
+    backup_dir = Path(backup_dir or default_path().parent / "backups")
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    target = backup_dir / f"trade_{(today or datetime.now()):%Y%m%d}.db"
+    made = None
+    if not target.exists():
+        tmp = target.with_suffix(".tmp")
+        dest = sqlite3.connect(tmp)
+        try:
+            conn.backup(dest)      # 다른 에이전트가 쓰는 중이어도 일관된 스냅샷
+        finally:
+            dest.close()
+        tmp.replace(target)
+        made = target
+    for old in sorted(backup_dir.glob("trade_*.db"))[:-keep or None]:
+        old.unlink()
+    return made
 
 
 def stage_order_sql(col="stage"):

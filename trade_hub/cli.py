@@ -7,6 +7,7 @@
   trade_hub drop 5 "검색량 부족"     # 품목 중단 (사유 기록)
   trade_hub tasks                   # 대기 중인 할 일 (자세히)
   trade_hub done 4                  # 할 일 완료 처리
+  trade_hub dismiss 6 7             # 할 일 기각 (안 하기로 함)
   trade_hub briefing                # 최신 슈퍼바이저 브리핑
 
 (설치 없이: python -m trade_hub.cli summary)
@@ -77,11 +78,14 @@ def tasks(conn):
         print("  (없음)")
 
 
-def done(conn, args):
-    for n in (int(a) for a in args if a.isdigit()):
+def done(conn, args, status="done"):
+    nums = [int(a) for a in args if a.isdigit()]
+    if not nums:
+        sys.exit(f"사용법: trade_hub {'done' if status == 'done' else 'dismiss'} <할 일 번호...>")
+    for n in nums:
         with conn:
-            cur = conn.execute("UPDATE tasks SET status = 'done', done_at = ? WHERE id = ? AND status = 'pending'",
-                               (db.now(), n))
+            cur = conn.execute("UPDATE tasks SET status = ?, done_at = ? WHERE id = ? AND status = 'pending'",
+                               (status, db.now(), n))
         print(f"  {'✓' if cur.rowcount else '·'} 할 일 #{n}" + ("" if cur.rowcount else " (없거나 이미 처리됨)"))
 
 
@@ -108,6 +112,8 @@ def main(argv=None):
         tasks(conn)
     elif cmd == "done":
         done(conn, rest)
+    elif cmd == "dismiss":
+        done(conn, rest, status="dismissed")
     elif cmd == "briefing":
         briefing(conn)
     else:

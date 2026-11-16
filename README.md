@@ -36,6 +36,7 @@ trade_hub select 3 7 12        # 후보를 공급처 발굴 단계(sourcing)로 
 trade_hub drop 5 "검색량 부족"  # 중단 (사유 기록)
 trade_hub tasks                # 승인 대기함 (자세히)
 trade_hub done 4               # 할 일 완료
+trade_hub dismiss 6 7          # 할 일 기각 (안 하기로 함)
 trade_hub briefing             # 최신 슈퍼바이저 브리핑
 ```
 
@@ -47,6 +48,7 @@ python supervisor.py tick            # 스케줄 실행 + (20시간마다) 검�
 python supervisor.py tick --dry-run  # 무엇을 실행할지 보기만
 python supervisor.py review          # 지금 바로 검토 (LLM)
 python supervisor.py review --no-llm # 규칙 기반 경고만 (API 비용 없음)
+python supervisor.py backup          # 공용 DB 백업 (tick에서 하루 1번 자동)
 ```
 
 **① 스케줄러 (코드, LLM 없음)** — `supervisor.json`의 에이전트를 규칙대로 실행
@@ -59,6 +61,9 @@ python supervisor.py review --no-llm # 규칙 기반 경고만 (API 비용 없�
 - 규칙 경고: 실패한 실행, 오래 대기 중인 할 일, 진행 없는 품목, 방치된 고득점 후보, 낮은 마진, 오래 안 돈 에이전트
 - LLM이 오늘의 브리핑과 **결정할 일**(최대 5개)을 작성 → `briefings`와 승인 대기함(`tasks`, kind=decision)
 - 단계 변경·메일 발송·다른 에이전트 데이터 수정은 하지 않음
+- 이미 대기 중인 할 일과 같은 취지는 다시 제안하지 않고, 자기가 만든 제안이 `decision_expire_days`(기본 7일) 넘게 대기하면 자동 기각
+
+**③ 백업** — tick 때 하루 1번 공용 DB를 `data/backups/trade_YYYYMMDD.db`로 복사, 최근 `keep`(기본 14)개만 유지
 
 정기 실행: 작업 스케줄러에서 프로그램 `python`, 인수 `supervisor.py tick`, **시작 위치를 이 폴더로** 지정.
 
@@ -66,6 +71,8 @@ python supervisor.py review --no-llm # 규칙 기반 경고만 (API 비용 없�
 
 1. `pip install -e ../trade_hub` 후 `from trade_hub import db`
 2. 실행할 때 `with db.agent_run(conn, "<에이전트 이름>") as run:`으로 감싸 `agent_runs`에 기록
+   - 쓰기는 `with conn:`으로 **짧게 나눠 커밋**할 것. 커밋 안 한 채 LLM 응답을 기다리면 그동안 DB 쓰기 잠금이 잡혀
+     다른 에이전트·CLI가 `database is locked`로 실패함. 실행이 예외로 끝나면 커밋 안 된 쓰기는 버려짐(rollback)
    (이름: discover · sourcing · negotiation · documents · compliance · costing · sales · finance)
 3. 자기 담당 테이블에만 쓰기 (`trade_hub/schema.sql` 머리말). 단계는 `db.advance_stage`로 앞으로만 이동
 4. 되돌리기 어려운 일(메일 발송·결제 등)은 실행하지 말고 `db.add_task`로 승인 대기함에 남기기
@@ -76,3 +83,10 @@ python supervisor.py review --no-llm # 규칙 기반 경고만 (API 비용 없�
 | 1. discover | `../supplier_agent` | 연결됨 (주 1회) |
 | 2. sourcing | `../trade_sourcing_agent` | 설정 예시만 (꺼짐) — 공용 DB 연동 필요 |
 | 3·5·6·8 | 미정 | 설정 예시만 (꺼짐) |
+
+## 5. 테스트
+
+```bash
+pip install pytest
+python -m pytest -q      # 임시 DB로 실행 (data/trade.db는 건드리지 않음)
+```

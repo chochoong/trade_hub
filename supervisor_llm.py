@@ -9,13 +9,7 @@
 
 import os
 import re
-import sys
 from pathlib import Path
-
-try:
-    import anthropic
-except ImportError:
-    sys.exit("anthropic 패키지가 필요합니다:  pip install -r requirements.txt")
 
 DEFAULT_MODEL = "claude-sonnet-5-5"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api"
@@ -44,8 +38,18 @@ def load_dotenv(path):
             os.environ.setdefault(key, value)
 
 
+def _anthropic():
+    """LLM을 실제로 쓸 때만 불러온다 (status·review --no-llm 등은 anthropic 패키지 없이도 동작)."""
+    try:
+        import anthropic
+    except ImportError:
+        raise RuntimeError("anthropic 패키지가 필요합니다:  pip install -r requirements.txt") from None
+    return anthropic
+
+
 def make_backend(provider=None, model=None):
     """(client, model, 추가 요청 옵션, 표시 이름). 키는 각 접속처 것만 넘긴다."""
+    anthropic = _anthropic()
     provider = (provider or os.environ.get("PROVIDER") or "anthropic").strip().lower()
     if provider == "openrouter":
         key = os.environ.get("OPENROUTER_API_KEY")
