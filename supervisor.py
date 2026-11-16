@@ -1,0 +1,396 @@
+#!/usr/bin/env python3
+"""
+슈퍼바이저 — 1인 무역 에이전트 파이프라인의 관제탑.
+
+  ① 스케줄러 (코드, LLM 없음): supervisor.json 규칙에 따라 각 에이전트를 실행할지 정하고 실행한다.
+  ② 검토관 (LLM, 읽기 전용): 공용 DB 전체를 읽고 브리핑·경고·제안을 남긴다.
+     DB에는 briefings와 tasks(kind='decision')만 쓴다. 단계 변경·메일 발송·다른 에이전트 데이터 수정은 하지 않는다.
+
+사용:
+  python supervisor.py                 # 상태 보기 (에이전트별 마지막 실행, 실행 예정 여부)
+  python supervisor.py tick            # 스케줄 실행 + (주기가 되면) 검토. 작업 스케줄러에 1시간마다 등록용
+  python supervisor.py tick --dry-run  # 무엇을 실행할지 보기만
+  python supervisor.py schedule        # 스케줄러만
+  python supervisor.py review          # 검토관만 (지금 바로)
+  python supervisor.py review --no-llm # LLM 없이 규칙 기반 경고만
+
+사람이 공용 DB를 보고 다루는 명령은 trade-hub (python -m trade_hub.cli) 참고.
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import supervisor_llm as llm
+from trade_hub import db as trade_db
+
+ROOT = Path(__file__).resolve().parent
+CONFIG_PATH = ROOT / "supervisor.json"
+LOG_DIR = ROOT / "data" / "logs"
+
+
+def load_config(path=CONFIG_PATH):
+    cfg = json.loads(Path(path).read_text(encoding="utf-8"))
+    cfg.setdefault("agents", {})
+    cfg.setdefault("review", {})
+    cfg.setdefault("alerts", {})
+    return cfg
+
+
+def parse_ts(s):
+    return datetime.fromisoformat(s) if s else None
+
+
+def hours_since(ts, now):
+    return None if ts is None else (now - ts).total_seconds() / 3600
+
+
+# ---------------------------------------------------------------------------
+# ① 스케줄러
+# ---------------------------------------------------------------------------
+def last_activity(conn, agent):
+    """에이전트의 마지막 실행 시각 (에이전트가 직접 남긴 agent_runs와 슈퍼바이저 실행 기록 중 최신)."""
+    a = conn.execute("SELECT MAX(started_at) FROM agent_runs WHERE agent = ?", (agent,)).fetchone()[0]
+    d = conn.execute("SELECT MAX(started_at) FROM supervisor_dispatches WHERE agent = ?", (agent,)).fetchone()[0]
+    return max(filter(None, (parse_ts(a), parse_ts(d))), default=None)
+
+
+def is_running(conn, agent, timeout_minutes, now):
+    since = (now - timedelta(minutes=timeout_minutes)).strftime("%Y-%m-%dT%H:%M:%S")
+    r = conn.execute("SELECT 1 FROM agent_runs WHERE agent = ? AND status = 'running' AND started_at > ?",
+                     (agent, since)).fetchone()
+    d = conn.execute("SELECT 1 FROM supervisor_dispatches WHERE agent = ? AND finished_at IS NULL AND started_at > ?",
+                     (agent, since)).fetchone()
+    return bool(r or d)
+
+
+def decide(conn, name, spec, now):
+    """(실행할지, 사유)를 돌려준다."""
+    if not spec.get("enabled"):
+        return False, "꺼짐"
+    if not spec.get("command"):
+        return False, "command 없음"
+    if is_running(conn, name, spec.get("timeout_minutes", 60), now):
+        return False, "실행 중"
+    last = last_activity(conn, name)
+    since = hours_since(last, now)
+    if spec.get("when_sql"):
+        try:
+            n = conn.execute(spec["when_sql"]).fetchone()[0] or 0
+        except Exception as e:
+            return False, f"when_sql 오류: {e}"
+        if n > 0:
+            min_h = spec.get("min_interval_hours", 1)
+            if since is not None and since < min_h:
+                return False, f"처리할 항목 {n}건 · 최근 실행 {since:.1f}시간 전 (최소 간격 {min_h}시간)"
+            return True, f"처리할 항목 {n}건"
+    if spec.get("every_hours") is not None:
+        if since is None:
+            return True, "첫 실행"
+        if since >= spec["every_hours"]:
+            return True, f"주기 도래 (마지막 실행 {since:.0f}시간 전, 주기 {spec['every_hours']}시간)"
+        return False, f"다음 실행까지 {spec['every_hours'] - since:.0f}시간"
+    return False, "처리할 항목 없음" if spec.get("when_sql") else "실행 조건 없음"
+
+
+def dispatch(conn, run_id, name, spec, reason, log=print):
+    """에이전트 명령을 실행하고 결과를 supervisor_dispatches에 남긴다."""
+    cmd = [sys.executable if part == "{python}" else part for part in spec["command"]]
+    cwd = (ROOT / spec.get("cwd", ".")).resolve()
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = LOG_DIR / f"{datetime.now():%Y%m%d_%H%M%S}_{name}.log"
+    with conn:
+        did = conn.execute(
+            "INSERT INTO supervisor_dispatches (run_id, agent, reason, command, log_path) VALUES (?, ?, ?, ?, ?)",
+            (run_id, name, reason, subprocess.list2cmdline(cmd), str(log_path))).lastrowid
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "TRADE_DB": str(trade_db.default_path().resolve())}
+    log(f"  ▶ {name} 실행: {reason}")
+    try:
+        with open(log_path, "w", encoding="utf-8") as f:
+            code = subprocess.run(cmd, cwd=cwd, env=env, stdout=f, stderr=subprocess.STDOUT,
+                                  timeout=spec.get("timeout_minutes", 60) * 60).returncode
+    except subprocess.TimeoutExpired:
+        code = -1
+        log(f"    ✗ 시간 초과 ({spec.get('timeout_minutes', 60)}분)")
+    except OSError as e:   # 명령·폴더 없음 등
+        code = -2
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"\n[supervisor] 실행 실패: {e}\n")
+        log(f"    ✗ 실행 실패: {e}")
+    with conn:
+        conn.execute("UPDATE supervisor_dispatches SET exit_code = ?, finished_at = ? WHERE id = ?",
+                     (code, trade_db.now(), did))
+    log(f"    {'✓ 완료' if code == 0 else f'✗ 종료 코드 {code}'} · 로그: {log_path}")
+    return code
+
+
+def schedule(conn, cfg, run_id=None, dry_run=False, log=print):
+    now = datetime.now()
+    ran = 0
+    for name, spec in cfg["agents"].items():
+        due, reason = decide(conn, name, spec, now)
+        if not due:
+            continue
+        if dry_run:
+            log(f"  (dry-run) {name} 실행 예정: {reason}")
+            continue
+        dispatch(conn, run_id, name, spec, reason, log)
+        ran += 1
+    if not ran and not dry_run:
+        log("  실행할 에이전트 없음")
+    return ran
+
+
+# ---------------------------------------------------------------------------
+# ② 검토관
+# ---------------------------------------------------------------------------
+def rows(conn, sql, *params):
+    return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def snapshot(conn):
+    """검토관이 볼 DB 요약 (LLM에 그대로 전달)."""
+    return {
+        "now": trade_db.now(),
+        "stage_counts": {r["stage"]: r["n"] for r in rows(
+            conn, f"SELECT stage, COUNT(*) n FROM products GROUP BY stage ORDER BY {trade_db.stage_order_sql()}")},
+        "active_products": rows(conn, """
+            SELECT p.id, p.name, p.stage, p.updated_at,
+                   (SELECT MAX(at) FROM product_events e WHERE e.product_id = p.id) AS last_event_at,
+                   (SELECT COUNT(*) FROM product_suppliers ps WHERE ps.product_id = p.id) AS suppliers,
+                   (SELECT COUNT(*) FROM quotes q JOIN product_suppliers ps ON ps.id = q.product_supplier_id
+                     WHERE ps.product_id = p.id) AS quotes
+            FROM products p WHERE p.stage NOT IN ('candidate', 'closed', 'dropped')"""),
+        "top_candidates": rows(conn, """
+            SELECT p.id, p.name, p.category, p.created_at, s.total, s.demand, s.margin, s.competition, s.naver_json
+            FROM products p
+            JOIN product_scores s ON s.id = (SELECT MAX(id) FROM product_scores WHERE product_id = p.id)
+            WHERE p.stage = 'candidate' ORDER BY s.total DESC LIMIT 10"""),
+        "pending_tasks": rows(conn, """
+            SELECT id, product_id, kind, title, priority, due_date, created_at FROM tasks
+            WHERE status = 'pending' ORDER BY priority, created_at LIMIT 30"""),
+        "low_margin_offers": rows(conn, """
+            SELECT p.id AS product_id, p.name, s.company, ps.est_margin_pct, ps.status
+            FROM product_suppliers ps JOIN products p ON p.id = ps.product_id JOIN suppliers s ON s.id = ps.supplier_id
+            WHERE p.stage NOT IN ('closed', 'dropped') AND ps.status <> 'rejected' AND ps.est_margin_pct IS NOT NULL
+            ORDER BY ps.est_margin_pct LIMIT 10"""),
+        "recent_runs": rows(conn, """
+            SELECT id, agent, status, started_at, finished_at, substr(error, 1, 200) AS error FROM agent_runs
+            WHERE started_at > datetime('now', 'localtime', '-7 days') ORDER BY id DESC LIMIT 30"""),
+        "recent_dispatches": rows(conn, """
+            SELECT agent, reason, exit_code, started_at, finished_at, log_path FROM supervisor_dispatches
+            WHERE started_at > datetime('now', 'localtime', '-7 days') ORDER BY id DESC LIMIT 20"""),
+        "pnl": rows(conn, "SELECT * FROM v_product_pnl WHERE revenue_krw <> 0 OR cost_krw <> 0"),
+    }
+
+
+def rule_alerts(conn, cfg, snap, now=None):
+    """규칙 기반 경고 (LLM 없이도 항상 계산). level: warn | info"""
+    now = now or datetime.now()
+    a = {"task_stale_days": 3, "product_stale_days": 14, "candidate_waiting_days": 7,
+         "candidate_good_score": 65, "low_margin_pct": 15, "run_stuck_hours": 6, **cfg.get("alerts", {})}
+    out = []
+
+    def add(level, text, product_id=None):
+        out.append({"level": level, "text": text, "product_id": product_id})
+
+    for r in snap["recent_runs"]:
+        if r["status"] == "failed":
+            add("warn", f"{r['agent']} 실행 #{r['id']} 실패 ({r['started_at']}): {r['error'] or '오류 내용 없음'}")
+        elif r["status"] == "running" and hours_since(parse_ts(r["started_at"]), now) > a["run_stuck_hours"]:
+            add("warn", f"{r['agent']} 실행 #{r['id']}이 {a['run_stuck_hours']}시간 넘게 'running' 상태 (비정상 종료 의심)")
+    for d in snap["recent_dispatches"]:
+        if d["exit_code"] not in (0, None):
+            add("warn", f"슈퍼바이저가 실행한 {d['agent']}가 종료 코드 {d['exit_code']}로 끝남 ({d['started_at']}) · 로그: {d['log_path']}")
+    for t in snap["pending_tasks"]:
+        age = hours_since(parse_ts(t["created_at"]), now) / 24
+        overdue = t["due_date"] and t["due_date"] < now.strftime("%Y-%m-%d")
+        if overdue or age >= a["task_stale_days"]:
+            add("warn", f"할 일 #{t['id']} '{t['title']}' " + ("기한 지남" if overdue else f"{age:.0f}일째 대기"),
+                t["product_id"])
+    for p in snap["active_products"]:
+        idle = hours_since(parse_ts(p["last_event_at"] or p["updated_at"]), now) / 24
+        if idle >= a["product_stale_days"]:
+            add("info", f"'{p['name']}'({p['stage']})가 {idle:.0f}일째 진행 없음", p["id"])
+        if p["stage"] == "sourcing" and p["suppliers"] == 0 and idle >= 2:
+            add("info", f"'{p['name']}'가 공급처 발굴 단계인데 {idle:.0f}일째 공급처 0곳", p["id"])
+    for c in snap["top_candidates"]:
+        wait = hours_since(parse_ts(c["created_at"]), now) / 24
+        if (c["total"] or 0) >= a["candidate_good_score"] and wait >= a["candidate_waiting_days"]:
+            add("info", f"고득점 후보 '{c['name']}'({c['total']}점)가 {wait:.0f}일째 선정 대기 → 진행/중단 결정 필요", c["id"])
+    for o in snap["low_margin_offers"]:
+        if o["est_margin_pct"] < a["low_margin_pct"]:
+            add("warn", f"'{o['name']}' × {o['company']} 추정 마진 {o['est_margin_pct']}% (기준 {a['low_margin_pct']}% 미만)",
+                o["product_id"])
+    for name, spec in cfg["agents"].items():
+        every = spec.get("every_hours")
+        if spec.get("enabled") and every is not None:
+            since = hours_since(last_activity(conn, name), now)
+            if since is not None and since > every * 2:
+                add("warn", f"{name} 에이전트가 {since:.0f}시간째 실행 안 됨 (주기 {every}시간)")
+    return out
+
+
+REVIEW_SYSTEM = """당신은 1인 수입 무역 에이전트 파이프라인의 '슈퍼바이저 검토관'입니다.
+여러 에이전트(시장조사, 공급처 발굴, 협상, 서류, 통관, 원가, 판매, 재무)가 공용 DB에 남긴 결과를 읽고,
+사용자(1인 사업자)가 오늘 무엇을 먼저 해야 하는지 브리핑합니다.
+
+원칙:
+- 주어진 DB 요약과 규칙 경고에 있는 사실만 사용합니다. 없는 수치나 사건을 만들지 않습니다.
+- 당신은 읽기 전용입니다. 메일 발송·결제·단계 변경을 직접 하지 않고, 사람에게 '결정할 일'을 제안만 합니다.
+- 단계를 넘나드는 판단을 우선합니다 (예: 견적 기준 마진이 처음 추정보다 크게 낮음, 고득점 후보가 방치됨, 같은 에이전트가 반복 실패).
+- 짧고 구체적으로. 품목은 이름과 번호로 지칭합니다.
+- 결과는 반드시 submit_briefing 도구로 제출합니다."""
+
+SUBMIT_BRIEFING_TOOL = {
+    "name": "submit_briefing",
+    "description": "오늘의 브리핑과 사람이 결정할 일 제안을 제출합니다.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "summary": {"type": "string",
+                        "description": "오늘의 브리핑 (한국어 마크다운, 15줄 이내): 전체 현황 → 주의할 점 → 오늘 할 일 순"},
+            "suggestions": {
+                "type": "array",
+                "description": "사람이 결정·처리할 일 (최대 5개, 중요한 것부터)",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "할 일 제목 (한 줄)"},
+                        "detail": {"type": "string", "description": "근거와 권장 행동"},
+                        "priority": {"type": "number", "enum": [1, 2, 3], "description": "1 높음 · 2 보통 · 3 낮음"},
+                        "product_id": {"type": ["number", "null"], "description": "관련 품목 번호 (없으면 null)"},
+                    },
+                    "required": ["title", "detail", "priority", "product_id"],
+                },
+            },
+        },
+        "required": ["summary", "suggestions"],
+    },
+}
+
+
+def plain_summary(snap, alerts):
+    """LLM 없이 만드는 간단한 브리핑."""
+    stages = " · ".join(f"{k} {v}" for k, v in snap["stage_counts"].items()) or "품목 없음"
+    lines = [f"**현황**: {stages} · 대기 할 일 {len(snap['pending_tasks'])}건"]
+    if alerts:
+        lines.append("**경고**")
+        lines += [f"- {'⚠️' if x['level'] == 'warn' else 'ℹ️'} {x['text']}" for x in alerts[:15]]
+    else:
+        lines.append("특이사항 없음")
+    return "\n".join(lines)
+
+
+def review(conn, cfg, run_id, use_llm=True, log=print):
+    snap = snapshot(conn)
+    alerts = rule_alerts(conn, cfg, snap)
+    suggestions = []
+    if use_llm:
+        backend = llm.make_backend(cfg["review"].get("provider"), cfg["review"].get("model"))
+        log(f"  · 검토관: {backend[3]} · {backend[1]}")
+        data = llm.submit(
+            backend, REVIEW_SYSTEM,
+            "공용 DB 요약(JSON)과 규칙 기반 경고입니다. 오늘의 브리핑과 결정할 일을 submit_briefing으로 제출하세요.\n\n"
+            f"<db_snapshot>\n{json.dumps(snap, ensure_ascii=False, default=str)}\n</db_snapshot>\n\n"
+            f"<rule_alerts>\n{json.dumps(alerts, ensure_ascii=False)}\n</rule_alerts>",
+            SUBMIT_BRIEFING_TOOL)
+        summary = data["summary"]
+        suggestions = data["suggestions"][:5]
+    else:
+        summary = plain_summary(snap, alerts)
+
+    valid_ids = {r[0] for r in conn.execute("SELECT id FROM products")}
+    with conn:
+        bid = conn.execute(
+            "INSERT INTO briefings (run_id, summary, alerts_json, source_runs_json) VALUES (?, ?, ?, ?)",
+            (run_id, summary, trade_db.dumps(alerts), trade_db.dumps([r["id"] for r in snap["recent_runs"]]))
+        ).lastrowid
+        for s in suggestions:
+            pid = int(s["product_id"]) if s.get("product_id") in valid_ids else None
+            trade_db.add_task(conn, "decision", s["title"], product_id=pid, run_id=run_id,
+                              detail=s["detail"], priority=int(s["priority"]))
+    return bid, summary, alerts, suggestions
+
+
+def review_due(conn, cfg, now):
+    if not cfg["review"].get("enabled", True):
+        return False
+    last = conn.execute("SELECT MAX(created_at) FROM briefings").fetchone()[0]
+    since = hours_since(parse_ts(last), now)
+    return since is None or since >= cfg["review"].get("every_hours", 20)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+def show_status(conn, cfg):
+    now = datetime.now()
+    print("▶ 에이전트")
+    for name, spec in cfg["agents"].items():
+        last = last_activity(conn, name)
+        due, reason = decide(conn, name, spec, now)
+        mark = "▶ 실행 예정" if due else "·"
+        print(f"  {name:<12} {'켜짐' if spec.get('enabled') else '꺼짐':<3} 마지막 {last:%m-%d %H:%M} " if last
+              else f"  {name:<12} {'켜짐' if spec.get('enabled') else '꺼짐':<3} 마지막 -          ", end="")
+        print(f"{mark} {reason}")
+    b = conn.execute("SELECT created_at, summary FROM briefings ORDER BY id DESC LIMIT 1").fetchone()
+    print("▶ 최근 브리핑" + (f" ({b['created_at']})\n{b['summary']}" if b else ": 없음"))
+    print(f"▶ 검토 예정: {'예' if review_due(conn, cfg, now) else '아니오'}")
+
+
+def print_review(summary, alerts, suggestions):
+    print("\n" + summary)
+    if suggestions:
+        print("\n▶ 결정할 일 (승인 대기함에 추가)")
+        for s in suggestions:
+            print(f"  [{int(s['priority'])}] {s['title']}")
+    print(f"\n(규칙 경고 {len(alerts)}건)")
+
+
+def main():
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+    ap = argparse.ArgumentParser(description="슈퍼바이저 (스케줄러 + 검토관)")
+    ap.add_argument("cmd", nargs="?", default="status", choices=["status", "tick", "schedule", "review"])
+    ap.add_argument("--dry-run", action="store_true", help="에이전트를 실행하지 않고 실행 예정만 표시")
+    ap.add_argument("--no-llm", action="store_true", help="검토관이 LLM 없이 규칙 기반 경고만 남김")
+    ap.add_argument("--no-review", action="store_true", help="tick에서 검토를 건너뜀")
+    ap.add_argument("--config", default=str(CONFIG_PATH))
+    args = ap.parse_args()
+
+    llm.load_dotenv(ROOT / ".env")
+    cfg = load_config(args.config)
+    conn = trade_db.connect()
+    print(f"DB: {trade_db.default_path()}")
+
+    if args.cmd == "status":
+        show_status(conn, cfg)
+        return
+    if args.dry_run:
+        print("▶ 스케줄 (dry-run)")
+        schedule(conn, cfg, dry_run=True)
+        if args.cmd == "tick":
+            print(f"▶ 검토: {'예정' if review_due(conn, cfg, datetime.now()) and not args.no_review else '없음'}")
+        return
+
+    with trade_db.agent_run(conn, "supervisor", args={"cmd": args.cmd, "no_llm": args.no_llm}) as run:
+        if args.cmd in ("tick", "schedule"):
+            print("▶ 스케줄")
+            schedule(conn, cfg, run.id)
+        if args.cmd == "review" or (args.cmd == "tick" and not args.no_review and review_due(conn, cfg, datetime.now())):
+            print("▶ 검토")
+            bid, summary, alerts, suggestions = review(conn, cfg, run.id, use_llm=not args.no_llm)
+            print_review(summary, alerts, suggestions)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except RuntimeError as e:
+        sys.exit(f"\n✗ 중단: {e}")

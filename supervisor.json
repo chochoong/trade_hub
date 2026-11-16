@@ -1,0 +1,71 @@
+{
+  "_comment": [
+    "슈퍼바이저 설정. 에이전트 키는 각 에이전트가 agent_runs.agent에 남기는 이름과 같아야 합니다 (db/schema.sql 참고).",
+    "command: 실행 명령 (리스트). {python}은 슈퍼바이저를 실행한 파이썬으로 바뀝니다. cwd: 실행 폴더 (이 파일 기준 상대경로 가능).",
+    "실행 조건 (둘 중 하나라도 맞으면 실행): every_hours = 마지막 실행 후 N시간 경과 / when_sql = 결과가 1 이상 (처리할 일이 있음).",
+    "when_sql로 실행할 때는 min_interval_hours 안에 다시 실행하지 않습니다. 실행 중이거나 timeout_minutes 안에 시작된 실행이 있으면 건너뜁니다.",
+    "다른 에이전트를 연결하려면 command·cwd를 채우고 enabled를 true로 바꾸세요. 실행 시 환경변수 TRADE_DB로 공용 DB 경로를 넘겨줍니다."
+  ],
+  "agents": {
+    "discover": {
+      "enabled": true,
+      "command": ["{python}", "supplier_agent.py", "--count", "10", "--no-open"],
+      "cwd": "../supplier_agent",
+      "every_hours": 168,
+      "timeout_minutes": 30
+    },
+    "sourcing": {
+      "enabled": false,
+      "command": ["{python}", "sourcing_agent.py"],
+      "cwd": "../trade_sourcing_agent",
+      "when_sql": "SELECT COUNT(*) FROM products p WHERE p.stage = 'sourcing' AND NOT EXISTS (SELECT 1 FROM product_suppliers ps WHERE ps.product_id = p.id)",
+      "min_interval_hours": 6,
+      "timeout_minutes": 60
+    },
+    "negotiation": {
+      "enabled": false,
+      "command": ["{python}", "negotiation_agent.py"],
+      "cwd": "../negotiation_agent",
+      "when_sql": "SELECT COUNT(*) FROM messages m WHERE m.direction = 'inbound' AND NOT EXISTS (SELECT 1 FROM quotes q WHERE q.message_id = m.id)",
+      "min_interval_hours": 2,
+      "timeout_minutes": 30
+    },
+    "compliance": {
+      "enabled": false,
+      "command": ["{python}", "compliance_agent.py"],
+      "cwd": "../compliance_agent",
+      "when_sql": "SELECT COUNT(*) FROM products WHERE stage IN ('sourcing', 'negotiating') AND hs_code IS NULL",
+      "min_interval_hours": 12,
+      "timeout_minutes": 30
+    },
+    "costing": {
+      "enabled": false,
+      "command": ["{python}", "costing_agent.py"],
+      "cwd": "../costing_agent",
+      "when_sql": "SELECT COUNT(*) FROM product_suppliers WHERE unit_price_usd IS NOT NULL AND est_landed_krw IS NULL",
+      "min_interval_hours": 6,
+      "timeout_minutes": 15
+    },
+    "finance": {
+      "enabled": false,
+      "command": ["{python}", "finance_agent.py"],
+      "cwd": "../finance_agent",
+      "every_hours": 24,
+      "timeout_minutes": 30
+    }
+  },
+  "review": {
+    "enabled": true,
+    "every_hours": 20,
+    "provider": null,
+    "model": null
+  },
+  "alerts": {
+    "task_stale_days": 3,
+    "product_stale_days": 14,
+    "candidate_waiting_days": 7,
+    "candidate_good_score": 65,
+    "low_margin_pct": 15,
+    "run_stuck_hours": 6
+  }
+}

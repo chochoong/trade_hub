@@ -1,0 +1,78 @@
+# trade-hub — 1인 무역 에이전트 관제탑
+
+1인 무역 파이프라인의 에이전트들(시장조사 → 공급처 발굴 → 협상 → 서류 → 통관 → 원가 → 판매 → 재무)이
+함께 쓰는 **공용 DB**와, 모든 에이전트를 지켜보는 **슈퍼바이저**입니다. 각 에이전트는 별도 프로젝트로 두고,
+서로 직접 호출하지 않고 이 DB로 일을 주고받습니다.
+
+| 파일 | 역할 |
+|---|---|
+| `trade_hub/schema.sql` | 공용 DB 스키마 = 에이전트 간 약속. 머리말에 에이전트별 담당 테이블 정리. **스키마 변경은 여기서만** |
+| `trade_hub/db.py` | 공용 DB 헬퍼 (연결·실행 기록·품목·단계 이동·할 일). 각 에이전트가 `from trade_hub import db`로 사용 |
+| `trade_hub/cli.py` | 사람이 쓰는 명령어 `trade-hub` (현황, 후보 선정·중단, 할 일, 브리핑) |
+| `supervisor.py` / `supervisor.json` | 슈퍼바이저: 스케줄러(규칙대로 에이전트 실행) + 검토관(LLM 브리핑·경고·제안) |
+| `data/trade.db` | 공용 DB 파일 (git에 올라가지 않음) |
+
+## 1. 설치
+
+```bash
+pip install -r requirements.txt     # anthropic + trade-hub(편집 모드)
+```
+
+`.env` (git에 올라가지 않음) — 검토관 LLM용:
+
+```
+ANTHROPIC_API_KEY=sk-ant-...
+PROVIDER=anthropic                   # 또는 openrouter (OPENROUTER_API_KEY, OPENROUTER_MODEL)
+```
+
+각 에이전트 프로젝트에서는 `pip install -e ../trade-hub`로 설치해 씁니다 (편집 모드라 이 폴더를 고치면 바로 반영).
+
+## 2. 사람이 쓰는 명령 (`trade-hub`)
+
+```bash
+trade-hub summary              # 단계별 품목, 대기 중인 할 일, 최근 실행
+trade-hub candidates           # 후보 품목 (최신 점수순)
+trade-hub select 3 7 12        # 후보를 공급처 발굴 단계(sourcing)로 넘기기
+trade-hub drop 5 "검색량 부족"  # 중단 (사유 기록)
+trade-hub tasks                # 승인 대기함 (자세히)
+trade-hub done 4               # 할 일 완료
+trade-hub briefing             # 최신 슈퍼바이저 브리핑
+```
+
+## 3. 슈퍼바이저
+
+```bash
+python supervisor.py                 # 상태: 에이전트별 마지막 실행·실행 예정, 최근 브리핑
+python supervisor.py tick            # 스케줄 실행 + (20시간마다) 검토 ← 작업 스케줄러에 1시간마다 등록
+python supervisor.py tick --dry-run  # 무엇을 실행할지 보기만
+python supervisor.py review          # 지금 바로 검토 (LLM)
+python supervisor.py review --no-llm # 규칙 기반 경고만 (API 비용 없음)
+```
+
+**① 스케줄러 (코드, LLM 없음)** — `supervisor.json`의 에이전트를 규칙대로 실행
+- `every_hours`: 마지막 실행 후 N시간이 지나면 실행
+- `when_sql`: 공용 DB에 처리할 일이 있으면 실행 (`min_interval_hours`로 과도한 재실행 방지)
+- 실행 중이면 건너뛰고 `timeout_minutes`가 지나면 중단. 기록은 `supervisor_dispatches`, 출력은 `data/logs/`
+- 실행할 때 환경변수 `TRADE_DB`로 공용 DB 경로를 넘김
+
+**② 검토관 (LLM, 읽기 전용)** — 공용 DB 전체를 읽고 브리핑
+- 규칙 경고: 실패한 실행, 오래 대기 중인 할 일, 진행 없는 품목, 방치된 고득점 후보, 낮은 마진, 오래 안 돈 에이전트
+- LLM이 오늘의 브리핑과 **결정할 일**(최대 5개)을 작성 → `briefings`와 승인 대기함(`tasks`, kind=decision)
+- 단계 변경·메일 발송·다른 에이전트 데이터 수정은 하지 않음
+
+정기 실행: 작업 스케줄러에서 프로그램 `python`, 인수 `supervisor.py tick`, **시작 위치를 이 폴더로** 지정.
+
+## 4. 에이전트 연결 규칙
+
+1. `pip install -e ../trade-hub` 후 `from trade_hub import db`
+2. 실행할 때 `with db.agent_run(conn, "<에이전트 이름>") as run:`으로 감싸 `agent_runs`에 기록
+   (이름: discover · sourcing · negotiation · documents · compliance · costing · sales · finance)
+3. 자기 담당 테이블에만 쓰기 (`trade_hub/schema.sql` 머리말). 단계는 `db.advance_stage`로 앞으로만 이동
+4. 되돌리기 어려운 일(메일 발송·결제 등)은 실행하지 말고 `db.add_task`로 승인 대기함에 남기기
+5. `supervisor.json`에 `command`·`cwd`·실행 조건을 등록하고 `enabled: true`
+
+| 에이전트 | 프로젝트 | 상태 |
+|---|---|---|
+| 1. discover | `../supplier_agent` | 연결됨 (주 1회) |
+| 2. sourcing | `../trade_sourcing_agent` | 설정 예시만 (꺼짐) — 공용 DB 연동 필요 |
+| 3·5·6·8 | 미정 | 설정 예시만 (꺼짐) |
