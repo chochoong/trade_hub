@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "trade-hub"
+name = "trade_hub"
 version = "0.1.0"
 description = "1인 무역 에이전트들의 공용 DB(스키마·헬퍼)와 슈퍼바이저"
 requires-python = ">=3.10"
@@ -13,7 +13,7 @@ dependencies = []          # 공용 DB 헬퍼는 표준 라이브러리만 사�
 supervisor = ["anthropic>=2.8,<3"]
 
 [project.scripts]
-trade-hub = "trade_hub.cli:main"
+trade_hub = "trade_hub.cli:main"
 
 [tool.setuptools]
 packages = ["trade_hub"]

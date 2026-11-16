@@ -14,7 +14,7 @@
   python supervisor.py review          # 검토관만 (지금 바로)
   python supervisor.py review --no-llm # LLM 없이 규칙 기반 경고만
 
-사람이 공용 DB를 보고 다루는 명령은 trade-hub (python -m trade_hub.cli) 참고.
+사람이 공용 DB를 보고 다루는 명령은 trade_hub (python -m trade_hub.cli) 참고.
 """
 
 import argparse

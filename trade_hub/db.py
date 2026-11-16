@@ -4,7 +4,7 @@
 에이전트들은 서로 직접 호출하지 않고 이 DB로 일을 주고받는다.
 스키마(에이전트 간 약속)와 에이전트별 담당 테이블: trade_hub/schema.sql
 
-DB 파일 위치: 환경변수 TRADE_DB, 없으면 trade-hub/data/trade.db
+DB 파일 위치: 환경변수 TRADE_DB, 없으면 trade_hub/data/trade.db
 (슈퍼바이저가 에이전트를 실행할 때는 TRADE_DB를 넘겨준다)
 
 사용 예 (각 에이전트에서):

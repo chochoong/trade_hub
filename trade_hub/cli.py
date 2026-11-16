@@ -1,13 +1,13 @@
 """
 사람이 공용 DB를 보고 다루는 명령어.
 
-  trade-hub summary                 # 단계별 품목, 대기 중인 할 일, 최근 실행
-  trade-hub candidates              # 후보 품목 (최신 점수순)
-  trade-hub select 3 7 12           # 후보를 공급처 발굴 단계(sourcing)로 넘기기
-  trade-hub drop 5 "검색량 부족"     # 품목 중단 (사유 기록)
-  trade-hub tasks                   # 대기 중인 할 일 (자세히)
-  trade-hub done 4                  # 할 일 완료 처리
-  trade-hub briefing                # 최신 슈퍼바이저 브리핑
+  trade_hub summary                 # 단계별 품목, 대기 중인 할 일, 최근 실행
+  trade_hub candidates              # 후보 품목 (최신 점수순)
+  trade_hub select 3 7 12           # 후보를 공급처 발굴 단계(sourcing)로 넘기기
+  trade_hub drop 5 "검색량 부족"     # 품목 중단 (사유 기록)
+  trade_hub tasks                   # 대기 중인 할 일 (자세히)
+  trade_hub done 4                  # 할 일 완료 처리
+  trade_hub briefing                # 최신 슈퍼바이저 브리핑
 
 (설치 없이: python -m trade_hub.cli summary)
 """
@@ -51,7 +51,7 @@ def move(conn, cmd, args):
     nums = [int(a) for a in args if a.isdigit()]
     note = " ".join(a for a in args if not a.isdigit()) or None
     if not nums:
-        sys.exit(f"사용법: trade-hub {cmd} <품목 번호...>" + (' "사유"' if cmd == "drop" else ""))
+        sys.exit(f"사용법: trade_hub {cmd} <품목 번호...>" + (' "사유"' if cmd == "drop" else ""))
     for n in nums:
         with conn:
             row = conn.execute("SELECT stage, name FROM products WHERE id = ?", (n,)).fetchone()
