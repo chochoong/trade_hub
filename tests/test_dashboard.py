@@ -107,7 +107,8 @@ def test_supplier_contacts_links_and_v4_score(conn, tmp_path):
         db.link_supplier(conn, pid, b)
     html = dashboard.build(tmp_path / "s.html", conn, refs=False).read_text(encoding="utf-8")
     assert 'href="https://safe.example.com/"' in html and "업체 페이지" in html
-    assert "javascript:alert" not in html                      # http(s)가 아닌 링크는 버림
+    assert 'href="javascript' not in html                     # http(s)가 아닌 주소는 링크로 걸지 않고
+    assert 'title="링크로 열지 않음 (http/https 주소가 아님): javascript:alert(1)"' in html   # 마우스를 올리면 주소 표시
     assert "Alibaba 평점 4.8/5" in html and "WhatsApp +86 123" in html and "a@safe.example.com" in html
     assert "54점 (C)" in html and "예전 저장 문장" in html and "58.0점" not in html
 
@@ -141,7 +142,8 @@ def test_channel_ranking_above_supplier_table(conn, tmp_path):
     assert "(small_batch 기준)" in card
     assert 'href="https://ali.example.com/w/keycap"' in card and "82.5점" in card and "USD 3.2-4.5" in card
     assert 'title="1개부터 · 최소 1 piece"' in card
-    assert "javascript:alert" not in html and "Evil &lt;Site&gt;" in card and "단가 미확인" in card
+    assert 'href="javascript' not in html and "단가 미확인" in card
+    assert '<span class="nolink" title="링크로 열지 않음 (http/https 주소가 아님): javascript:alert(1)">Evil &lt;Site&gt;</span>' in card
 
 
 def test_no_channel_strip_without_data(conn, tmp_path):

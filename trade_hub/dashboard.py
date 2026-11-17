@@ -138,9 +138,13 @@ def link(path, label):
 
 
 def web_link(url, label):
-    """웹에서 수집한 URL은 http(s)만 링크로 (javascript: 등은 버림)."""
-    if not url or not str(url).lower().startswith(("http://", "https://")):
+    """웹에서 수집한 URL은 http(s)만 링크로. 그 밖의 주소(javascript: 등)는 누르면 코드가 실행될 수 있어
+    링크를 걸지 않고 글자로만 보여 주고, 마우스를 올리면 원래 주소가 보인다."""
+    if not url:
         return ""
+    if not str(url).strip().lower().startswith(("http://", "https://")):
+        return (f'<span class="nolink" title="{e("링크로 열지 않음 (http/https 주소가 아님): " + str(url))}">'
+                f'{e(label)}</span>')
     return f'<a href="{e(url)}" target="_blank" rel="noopener noreferrer">{e(label)}</a>'
 
 
@@ -454,6 +458,7 @@ table.tight td{padding:6px 8px}
 .ch{display:flex;align-items:baseline;gap:6px;border:1px solid var(--line);border-radius:8px;padding:3px 10px;cursor:default}
 .ch.top{border-color:var(--accent);background:var(--accent-soft)}.ch.unassessed{opacity:.6}
 .ch-rank{font-size:11px;color:var(--muted)}.ch-score{color:var(--accent)}
+.nolink{text-decoration:underline dotted;cursor:help}
 .card{border:1px solid var(--line);border-radius:10px;padding:12px;margin:10px 0}
 .card-head{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-bottom:8px}.right{margin-left:auto}
 .pcell{display:flex;gap:10px;align-items:flex-start;min-width:260px}
