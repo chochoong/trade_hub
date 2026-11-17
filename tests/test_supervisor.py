@@ -139,6 +139,74 @@ def test_single_instance_lock(tmp_path):
         assert again is True                                                                 # 풀린 뒤에는 다시 잡힘
 
 
+# --- 검토관 재료·경고 (docs 7.5) ------------------------------------------------
+def _sourcing_product_with_suppliers(conn):
+    with conn:
+        pid = db.upsert_product(conn, "키캡", stage="sourcing")
+        cur = conn.execute("INSERT INTO suppliers (company, country, trust, trust_reason, red_flags) VALUES (?, ?, ?, ?, ?)",
+                           ("Keycap Co", "China", "하", "58.0점 (C) — 소량 구매 가능",
+                            "IP 침해 소지가 있다., 사업자 정보를 확인하지 못했다., 제조사인지 불분명하다."))
+        conn.execute("INSERT INTO product_suppliers (product_id, supplier_id, is_top_pick, moq) VALUES (?, ?, 1, '50 pcs')",
+                     (pid, cur.lastrowid))
+        cur = conn.execute("INSERT INTO suppliers (company, country) VALUES ('Plain Co', 'China')")
+        conn.execute("INSERT INTO product_suppliers (product_id, supplier_id, is_top_pick) VALUES (?, ?, 0)",
+                     (pid, cur.lastrowid))
+    return pid
+
+
+def test_snapshot_top_suppliers(conn):
+    pid = _sourcing_product_with_suppliers(conn)
+    tops = sv.snapshot(conn)["top_suppliers"]
+    assert len(tops) == 1                      # 추천(is_top_pick)만
+    t = tops[0]
+    assert (t["product_id"], t["company"], t["score"], t["grade"], t["red_flag_count"]) == (pid, "Keycap Co", 58.0, "C", 3)
+    assert "trust_reason" not in t and t["red_flags_brief"].startswith("IP 침해")
+
+
+def test_top_suppliers_handles_missing_fields(conn):
+    with conn:
+        pid = db.upsert_product(conn, "선반", stage="sourcing")
+        sid = conn.execute("INSERT INTO suppliers (company) VALUES ('X')").lastrowid
+        conn.execute("INSERT INTO product_suppliers (product_id, supplier_id, is_top_pick) VALUES (?, ?, 1)", (pid, sid))
+    t = sv.top_suppliers(conn)[0]
+    assert (t["score"], t["grade"], t["red_flag_count"], t["red_flags_brief"]) == (None, None, 0, None)
+
+
+def test_no_supplier_alert_skipped_when_task_pending(conn):
+    with conn:
+        pid = db.upsert_product(conn, "선반", stage="sourcing")
+        conn.execute("UPDATE products SET updated_at = ? WHERE id = ?", (ts(24 * 3), pid))
+        conn.execute("UPDATE product_events SET at = ? WHERE product_id = ?", (ts(24 * 3), pid))
+
+    def zero_supplier_alerts():
+        return [a for a in sv.rule_alerts(conn, cfg(), sv.snapshot(conn), now=NOW) if "공급처 0곳" in a["text"]]
+
+    assert len(zero_supplier_alerts()) == 1
+    with conn:
+        db.add_task(conn, "decision", "[선반] 공급처를 찾지 못함", product_id=pid, priority=1)
+    assert zero_supplier_alerts() == []        # 2번이 만든 할 일이 대기 중이면 중복 경고 안 함
+
+
+def test_refresh_dashboard(conn, monkeypatch):
+    import sys
+    import types
+    calls = []
+    fake = types.SimpleNamespace(build=lambda **kw: calls.append(kw) or "dash.html")
+    monkeypatch.setitem(sys.modules, "trade_hub.dashboard", fake)
+    monkeypatch.setattr(sys.modules["trade_hub"], "dashboard", fake, raising=False)
+    quiet = lambda *_: None
+    assert sv.refresh_dashboard(conn, cfg(), log=quiet) == "dash.html"
+    assert calls[-1]["refs"] is True
+    sv.refresh_dashboard(conn, {**cfg(), "dashboard": {"refs": False}}, log=quiet)
+    assert calls[-1]["refs"] is False
+    assert sv.refresh_dashboard(conn, {**cfg(), "dashboard": {"enabled": False}}, log=quiet) is None
+
+    def boom(**kw):
+        raise OSError("디스크 가득")
+    fake.build = boom
+    assert sv.refresh_dashboard(conn, cfg(), log=quiet) is None   # 실패해도 예외를 밖으로 내지 않음
+
+
 # --- 검토관 -------------------------------------------------------------------
 def test_rule_alerts(conn):
     add_run(conn, "discover", hours_ago=1, status="failed")

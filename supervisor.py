@@ -21,6 +21,7 @@
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -242,6 +243,30 @@ def rows(conn, sql, *params):
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
+_SCORE_RE = re.compile(r"^\s*([\d.]+)\s*점\s*\(([A-Z])\)")
+
+
+def top_suppliers(conn, limit=30):
+    """진행 중 품목의 추천 공급처 요약 (검토관이 '어느 업체에 먼저 연락할지' 판단하는 재료).
+    2번이 trust_reason을 "<점수>점 (<등급>) — 요약", red_flags를 ', '로 이은 문장들로 남긴다 (docs 7.1)."""
+    out = []
+    for r in rows(conn, """
+            SELECT p.id AS product_id, p.name AS product, s.company, s.country, s.trust, s.trust_reason, s.red_flags,
+                   ps.status, ps.moq, ps.unit_price_usd, ps.price_note
+            FROM product_suppliers ps JOIN products p ON p.id = ps.product_id JOIN suppliers s ON s.id = ps.supplier_id
+            WHERE ps.is_top_pick = 1 AND ps.status <> 'rejected' AND p.stage NOT IN ('candidate', 'closed', 'dropped')
+            ORDER BY p.id, ps.id LIMIT ?""", limit):
+        m = _SCORE_RE.match(r.pop("trust_reason") or "")
+        flags = (r.pop("red_flags") or "").strip()
+        r["score"], r["grade"] = (float(m[1]), m[2]) if m else (None, None)
+        r["red_flag_count"] = len([x for x in re.split(r"(?<=[.다])\s*,\s+", flags) if x.strip()]) if flags else 0
+        r["red_flags_brief"] = flags[:200] or None
+        r["moq"] = (r["moq"] or "")[:80] or None
+        r["price_note"] = (r["price_note"] or "")[:80] or None
+        out.append(r)
+    return out
+
+
 def snapshot(conn):
     """검토관이 볼 DB 요약 (LLM에 그대로 전달)."""
     return {
@@ -253,8 +278,10 @@ def snapshot(conn):
                    (SELECT MAX(at) FROM product_events e WHERE e.product_id = p.id) AS last_event_at,
                    (SELECT COUNT(*) FROM product_suppliers ps WHERE ps.product_id = p.id) AS suppliers,
                    (SELECT COUNT(*) FROM quotes q JOIN product_suppliers ps ON ps.id = q.product_supplier_id
-                     WHERE ps.product_id = p.id) AS quotes
+                     WHERE ps.product_id = p.id) AS quotes,
+                   (SELECT COUNT(*) FROM tasks t WHERE t.product_id = p.id AND t.status = 'pending') AS pending_tasks
             FROM products p WHERE p.stage NOT IN ('candidate', 'closed', 'dropped')"""),
+        "top_suppliers": top_suppliers(conn),
         "top_candidates": rows(conn, """
             SELECT p.id, p.name, p.category, p.created_at, s.total, s.demand, s.margin, s.competition, s.naver_json
             FROM products p
@@ -306,7 +333,8 @@ def rule_alerts(conn, cfg, snap, now=None):
         idle = hours_since(parse_ts(p["last_event_at"] or p["updated_at"]), now) / 24
         if idle >= a["product_stale_days"]:
             add("info", f"'{p['name']}'({p['stage']})가 {idle:.0f}일째 진행 없음", p["id"])
-        if p["stage"] == "sourcing" and p["suppliers"] == 0 and idle >= 2:
+        # 2번이 '공급처를 찾지 못함' 할 일을 이미 만들었으면 (승인 대기함에 있음) 같은 내용을 또 경고하지 않음
+        if p["stage"] == "sourcing" and p["suppliers"] == 0 and idle >= 2 and not p["pending_tasks"]:
             add("info", f"'{p['name']}'가 공급처 발굴 단계인데 {idle:.0f}일째 공급처 0곳", p["id"])
     for c in snap["top_candidates"]:
         wait = hours_since(parse_ts(c["created_at"]), now) / 24
@@ -333,6 +361,7 @@ REVIEW_SYSTEM = """당신은 1인 수입 무역 에이전트 파이프라인의 
 - 주어진 DB 요약과 규칙 경고에 있는 사실만 사용합니다. 없는 수치나 사건을 만들지 않습니다.
 - 당신은 읽기 전용입니다. 메일 발송·결제·단계 변경을 직접 하지 않고, 사람에게 '결정할 일'을 제안만 합니다.
 - 단계를 넘나드는 판단을 우선합니다 (예: 견적 기준 마진이 처음 추정보다 크게 낮음, 고득점 후보가 방치됨, 같은 에이전트가 반복 실패).
+- top_suppliers는 진행 중 품목의 추천 공급처입니다 (score·grade: 2번 평가, red_flag_count: 위험 요소 수). 공급처 검토가 대기 중이면 점수와 위험을 근거로 먼저 연락할 업체를 짚어 줍니다.
 - pending_tasks에 이미 같은 취지의 할 일이 있으면 새로 제안하지 않습니다 (표현만 바꾼 중복 금지). 새로 결정할 것이 없으면 suggestions는 빈 목록입니다.
 - 짧고 구체적으로. 품목은 이름과 번호로 지칭합니다.
 - 결과는 반드시 submit_briefing 도구로 제출합니다."""
@@ -435,6 +464,22 @@ def run_backup(conn, cfg, log=print):
     return made
 
 
+def refresh_dashboard(conn, cfg, log=print):
+    """tick 끝에 대시보드 HTML을 다시 만든다 (열 때마다 최신). 실패해도 tick은 실패로 치지 않는다.
+    설정: "dashboard": {"enabled": true, "refs": true}  — refs=false면 네이버 참고 이미지 검색을 하지 않음."""
+    d = cfg.get("dashboard", {})
+    if not d.get("enabled", True):
+        return None
+    try:
+        from trade_hub import dashboard
+        path = dashboard.build(conn=conn, refs=d.get("refs", True), log=log)
+    except Exception as e:   # 대시보드는 부가 기능 — 에이전트 실행·검토 결과에 영향 주지 않음
+        log(f"  ✗ 대시보드 갱신 실패: {type(e).__name__}: {e}")
+        return None
+    log(f"  · 대시보드 갱신: {path}")
+    return path
+
+
 def review_due(conn, cfg, now):
     if not cfg["review"].get("enabled", True):
         return False
@@ -519,6 +564,9 @@ def main():
                 print("▶ 검토")
                 bid, summary, alerts, suggestions = review(conn, cfg, run.id, use_llm=not args.no_llm)
                 print_review(summary, alerts, suggestions)
+            if args.cmd == "tick":
+                print("▶ 대시보드")
+                refresh_dashboard(conn, cfg)   # 에이전트 결과·브리핑까지 반영된 뒤에
 
 
 if __name__ == "__main__":
