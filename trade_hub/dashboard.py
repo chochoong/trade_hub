@@ -589,12 +589,28 @@ def pnl_rows(conn):
                    num(r["cost_krw"], "{:,.0f}원"), num(r["profit_krw"], "{:,.0f}원")] for r in rows])
 
 
+def moved_on(conn):
+    """후보 목록에서 빠진(다음 단계로 넘어간) 품목 → 지금 있는 카드로 가는 링크. 최근에 넘어간 순."""
+    rows = conn.execute(f"""
+        SELECT p.id, p.name, p.stage,
+               (SELECT MAX(at) FROM product_events e WHERE e.product_id = p.id AND e.from_stage = 'candidate') AS moved_at
+        FROM products p WHERE p.stage NOT IN ('candidate', 'dropped')
+        ORDER BY moved_at IS NULL, moved_at DESC, p.id DESC""").fetchall()
+    if not rows:
+        return ""
+    out = [[f'#{r["id"]}', f'<a href="#p{r["id"]}">{e(r["name"])}</a>',
+            f'<span class="badge">{e(STAGE_LABEL.get(r["stage"], r["stage"]))}</span>',
+            e((r["moved_at"] or "")[:16].replace("T", " ")) or '<span class="muted">–</span>'] for r in rows]
+    return section("다음 단계로 넘어간 품목", table(["번호", "품목", "지금 단계", "넘어간 시각"], out, "tight"),
+                   f"{len(rows)}개 · 후보 목록에서 빠진 품목 · 이름을 누르면 지금 있는 화면으로 이동")
+
+
 def agent_body(conn, agent):
     """에이전트별 페이지의 본문 섹션들."""
     if agent == "discover":
         html, n = candidate_rows(conn)
         return [section("후보 품목", html, f"{n}개 · 다음 단계로: trade_hub select &lt;번호&gt; · 검색량은 '텀블러'=100"),
-                dropped(conn)]
+                moved_on(conn), dropped(conn)]
     if agent == "sourcing":
         html, n = products_in_progress(conn)
         return [section("품목별 공급처", html, f"{n}개 품목 · 업체 이름을 누르면 리포트 상세"),

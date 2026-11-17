@@ -151,3 +151,25 @@ def test_no_channel_strip_without_data(conn, tmp_path):
         db.upsert_product(conn, "키캡", stage="sourcing")
     html = dashboard.build(tmp_path / "n.html", conn, refs=False).read_text(encoding="utf-8")
     assert "구매 사이트 순위" not in html
+
+
+def test_moved_on_products_listed_under_candidates(conn, tmp_path):
+    with conn:
+        stay = db.upsert_product(conn, "후보 그대로")
+        moved = db.upsert_product(conn, "AI안경")
+        db.set_stage(conn, moved, "sourcing", note="사람이 선정")
+        gone = db.upsert_product(conn, "중단 품목")
+        db.set_stage(conn, gone, "dropped")
+    html = dashboard.build(tmp_path / "mv.html", conn, refs=False).read_text(encoding="utf-8")
+    page = html[html.index('id="p-a1"'):html.index('id="p-a2"')]          # 시장조사·아이템 발굴 화면
+    sec = page[page.index("다음 단계로 넘어간 품목"):]
+    assert f'<a href="#p{moved}">AI안경</a>' in sec and "공급처" in sec    # 지금 단계와 카드로 가는 링크
+    assert "후보 그대로" not in sec and "중단 품목" not in sec[:sec.index("</section>")]
+    assert f'id="prod-{moved}"' in html                                    # 링크가 가리키는 카드가 있음
+
+
+def test_moved_on_hidden_when_nothing_moved(conn, tmp_path):
+    with conn:
+        db.upsert_product(conn, "후보")
+    html = dashboard.build(tmp_path / "mv0.html", conn, refs=False).read_text(encoding="utf-8")
+    assert "다음 단계로 넘어간 품목" not in html
