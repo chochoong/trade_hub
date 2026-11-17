@@ -286,17 +286,19 @@ _SCORE_RE = re.compile(r"^\s*([\d.]+)\s*점\s*\(([A-Z])\)")
 
 def top_suppliers(conn, limit=30):
     """진행 중 품목의 추천 공급처 요약 (검토관이 '어느 업체에 먼저 연락할지' 판단하는 재료).
-    2번이 trust_reason을 "<점수>점 (<등급>) — 요약", red_flags를 ', '로 이은 문장들로 남긴다 (docs 7.1)."""
+    점수·등급은 product_suppliers.score·grade(v4), 비어 있으면 trust_reason "<점수>점 (<등급>) — 요약"에서 뽑는다.
+    red_flags는 ', '로 이은 문장들 (docs 7.1)."""
     out = []
     for r in rows(conn, """
             SELECT p.id AS product_id, p.name AS product, s.company, s.country, s.trust, s.trust_reason, s.red_flags,
-                   ps.status, ps.moq, ps.unit_price_usd, ps.price_note
+                   ps.status, ps.moq, ps.unit_price_usd, ps.price_note, ps.score, ps.grade
             FROM product_suppliers ps JOIN products p ON p.id = ps.product_id JOIN suppliers s ON s.id = ps.supplier_id
             WHERE ps.is_top_pick = 1 AND ps.status <> 'rejected' AND p.stage NOT IN ('candidate', 'closed', 'dropped')
             ORDER BY p.id, ps.id LIMIT ?""", limit):
         m = _SCORE_RE.match(r.pop("trust_reason") or "")
         flags = (r.pop("red_flags") or "").strip()
-        r["score"], r["grade"] = (float(m[1]), m[2]) if m else (None, None)
+        if r["score"] is None and m:   # v4 이전 저장분: trust_reason 문장에서 뽑음
+            r["score"], r["grade"] = float(m[1]), m[2]
         r["red_flag_count"] = len([x for x in re.split(r"(?<=[.다])\s*,\s+", flags) if x.strip()]) if flags else 0
         r["red_flags_brief"] = flags[:200] or None
         r["moq"] = (r["moq"] or "")[:80] or None

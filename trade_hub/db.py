@@ -25,11 +25,25 @@ from pathlib import Path
 
 PKG_DIR = Path(__file__).resolve().parent
 SCHEMA_PATH = PKG_DIR / "schema.sql"
-SCHEMA_VERSION = 3   # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
+SCHEMA_VERSION = 4   # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
 # 버전별로 추가된 컬럼: 예전 DB에는 connect() 때 ALTER TABLE로 붙인다 (새 DB는 schema.sql에 이미 있음)
+
+
+def _json_col(col):
+    return f"TEXT CHECK ({col} IS NULL OR json_valid({col}))"
+
+
 MIGRATIONS = {
     2: [("products", "ref_url", "TEXT"), ("products", "image_url", "TEXT")],
     3: [("product_suppliers", "image_url", "TEXT")],
+    4: [("product_suppliers", "score", "REAL"),
+        ("product_suppliers", "grade", "TEXT CHECK (grade IS NULL OR grade IN ('A', 'B', 'C', 'D'))"),
+        ("product_suppliers", "score_detail_json", _json_col("score_detail_json")),
+        ("product_suppliers", "purchase_mode", "TEXT"),
+        ("product_suppliers", "trade_terms_json", _json_col("trade_terms_json")),
+        ("product_suppliers", "first_questions_json", _json_col("first_questions_json")),
+        ("product_suppliers", "unverified_json", _json_col("unverified_json")),
+        ("product_suppliers", "evidence_json", _json_col("evidence_json"))],
 }
 
 STAGES = ["candidate", "sourcing", "negotiating", "sampling", "ordered", "shipping", "selling", "closed"]
@@ -185,7 +199,10 @@ def add_task(conn, kind, title, product_id=None, run_id=None, ref_table=None, re
 # ---------------------------------------------------------------------------
 SUPPLIER_FIELDS = {"type", "years_in_business", "certifications", "platform_badge", "url", "contact_name",
                    "contact_email", "contact_other", "trust", "trust_reason", "red_flags", "notes"}
-LINK_FIELDS = {"is_top_pick", "moq", "unit_price_usd", "price_note", "est_landed_krw", "est_margin_pct", "image_url"}
+LINK_FIELDS = {"is_top_pick", "moq", "unit_price_usd", "price_note", "est_landed_krw", "est_margin_pct", "image_url",
+               # v4: 2번이 이 품목 기준으로 평가한 결과. *_json 필드는 list/dict를 그대로 넘기면 JSON으로 저장
+               "score", "grade", "score_detail_json", "purchase_mode", "trade_terms_json", "first_questions_json",
+               "unverified_json", "evidence_json"}
 
 
 def _check_fields(fields, allowed, what):
@@ -212,6 +229,7 @@ def upsert_supplier(conn, company, country=None, **fields):
 def link_supplier(conn, product_id, supplier_id, run_id=None, **fields):
     """품목-공급처 연결을 만들거나 갱신한다. status(연락·견적 진행 상태)는 다른 단계가 바꾼 값을 유지. id를 돌려준다."""
     fields = _check_fields(fields, LINK_FIELDS, "품목-공급처")
+    fields = {k: dumps(v) if k.endswith("_json") and not isinstance(v, str) else v for k, v in fields.items()}
     row = conn.execute("SELECT id FROM product_suppliers WHERE product_id = ? AND supplier_id = ?",
                        (product_id, supplier_id)).fetchone()
     if row is None:

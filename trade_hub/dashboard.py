@@ -137,6 +137,20 @@ def link(path, label):
     return f'<a href="{e(file_href(p))}" target="_blank">{e(label)}</a>'
 
 
+def web_link(url, label):
+    """웹에서 수집한 URL은 http(s)만 링크로 (javascript: 등은 버림)."""
+    if not url or not str(url).lower().startswith(("http://", "https://")):
+        return ""
+    return f'<a href="{e(url)}" target="_blank" rel="noopener noreferrer">{e(label)}</a>'
+
+
+def supplier_score(s):
+    """v4 score·grade 칸이 있으면 그것, 없으면 예전 저장분의 trust_reason "<점수>점 (<등급>) — 요약" 앞부분."""
+    if s["ps_score"] is not None:
+        return f'{s["ps_score"]:g}점' + (f' ({s["ps_grade"]})' if s["ps_grade"] else "")
+    return (s["trust_reason"] or "").split(" — ")[0]
+
+
 def clip(text, n=90):
     """긴 글은 앞부분만 보이고 펼치면 전체."""
     if not text:
@@ -245,7 +259,8 @@ def products_in_progress(conn):
     cards = []
     for p in prods:
         sups = conn.execute("""
-            SELECT s.*, ps.id AS link_id, ps.image_url AS sup_image, ps.status, ps.is_top_pick, ps.moq, ps.price_note, ps.unit_price_usd, ps.run_id
+            SELECT s.*, ps.id AS link_id, ps.image_url AS sup_image, ps.status, ps.is_top_pick, ps.moq, ps.price_note, ps.unit_price_usd, ps.run_id,
+                   ps.score AS ps_score, ps.grade AS ps_grade
             FROM product_suppliers ps JOIN suppliers s ON s.id = ps.supplier_id
             WHERE ps.product_id = ? ORDER BY ps.is_top_pick DESC, ps.id""", (p["id"],)).fetchall()
         report = conn.execute("""SELECT detail, run_id FROM tasks WHERE product_id = ? AND run_id IN
@@ -264,17 +279,23 @@ def products_in_progress(conn):
             ranks = {lid: n for n, lid in enumerate(ids, 1)}
         rows = []
         for s in sups:
-            score = (s["trust_reason"] or "").split(" — ")[0]
             rank = ranks.get(s["link_id"])
             name = (f'<a href="{e(file_href(report_html))}#s{rank}" target="_blank" title="리포트에서 상세 보기">{e(s["company"])}</a>'
                     if rank else e(s["company"]))
+            site = web_link(s["url"], "업체 페이지 ↗")
+            badge = f'<div class="small">{clip(s["platform_badge"], 40)}</div>' if s["platform_badge"] else ""
+            reason = (s["trust_reason"] or "").split(" — ", 1)
+            reason = reason[1] if len(reason) == 2 else (s["trust_reason"] if s["ps_score"] is not None else "")
+            contact = "".join(f'<div>{x}</div>' for x in (e(s["contact_email"]), clip(s["contact_other"], 40)) if x)
             rows.append([
                 '<span class="pick">추천</span>' if s["is_top_pick"] else "",
                 f'<div class="pcell">{supplier_photo(s["sup_image"])}<div>{name}<div class="muted small">{e(s["country"])} · {e(s["type"])}'
-                f'{" · " + num(s["years_in_business"], "{:g}년") if s["years_in_business"] else ""}</div></div></div>',
-                f'<span class="trust t{e(s["trust"])}">{e(s["trust"] or "–")}</span> <span class="small">{e(score)}</span>',
+                f'{" · " + num(s["years_in_business"], "{:g}년") if s["years_in_business"] else ""}'
+                f'{" · " + site if site else ""}</div>{badge}</div></div>',
+                f'<span class="trust t{e(s["trust"])}">{e(s["trust"] or "–")}</span> <span class="small">{e(supplier_score(s))}</span>'
+                + (f'<div class="small">{clip(reason, 40)}</div>' if reason else ""),
                 e(s["status"]), clip(s["moq"], 30), clip(s["price_note"] or num(s["unit_price_usd"], "${:g}"), 30),
-                e(s["contact_email"]) or '<span class="muted">–</span>',
+                contact or '<span class="muted">–</span>',
                 clip(s["red_flags"], 50),
             ])
         last = conn.execute("SELECT note, at FROM product_events WHERE product_id = ? ORDER BY id DESC LIMIT 1",
@@ -285,7 +306,7 @@ def products_in_progress(conn):
     {photo(p, "big")}<div><b>#{p["id"]} {e(p["name"])}</b> <span class="muted small">{e(last["note"] if last else "")} · {e(last["at"][:16] if last else "")}</span>
     <div class="small">{search_links(p)}</div></div>
     <span class="right">{rep}{sourcing_button(p, bool(sups))}</span></div>
-  {table(["", "공급처", "신뢰도·점수", "상태", "MOQ", "단가", "이메일", "위험 요소"], rows, "tight")}
+  {table(["", "공급처", "신뢰도·점수", "상태", "MOQ", "단가", "연락처", "위험 요소"], rows, "tight")}
 </div>""")
     return "".join(cards), len(prods)
 

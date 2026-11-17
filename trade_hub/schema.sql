@@ -144,6 +144,16 @@ CREATE TABLE IF NOT EXISTS product_suppliers (
     est_landed_krw   INTEGER,                 -- 스크립트가 계산한 개당 원가
     est_margin_pct   REAL,
     image_url        TEXT,                    -- 이 공급사가 제공한 상품 사진 (URL 또는 상대경로)  [v3]
+    -- 2번이 '이 품목 기준으로' 평가한 결과 (같은 업체라도 품목마다 다름)  [v4]
+    score                 REAL,               -- 총점 (100점 만점, 위험 감점 반영)
+    grade                 TEXT CHECK (grade IS NULL OR grade IN ('A', 'B', 'C', 'D')),
+    score_detail_json     TEXT CHECK (score_detail_json IS NULL OR json_valid(score_detail_json)),   -- {"moq_fit":10, ..., "risk_penalty":-4}
+    purchase_mode         TEXT,               -- 조사 때 구매 방식: retail / small_batch / oem
+    trade_terms_json      TEXT CHECK (trade_terms_json IS NULL OR json_valid(trade_terms_json)),     -- 웹에서 본 조건 {"lead_time","payment_terms","sample","export_markets"}
+                                              --   업체가 답장으로 확정한 조건은 여기가 아니라 quotes에
+    first_questions_json  TEXT CHECK (first_questions_json IS NULL OR json_valid(first_questions_json)),  -- 첫 문의 때 물어볼 질문 ["...", ...]
+    unverified_json       TEXT CHECK (unverified_json IS NULL OR json_valid(unverified_json)),       -- 확인하지 못한 항목 ["...", ...]
+    evidence_json         TEXT CHECK (evidence_json IS NULL OR json_valid(evidence_json)),           -- 근거 [{"claim":"...","url":"..."}]
     reject_reason    TEXT,
     updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime')),
     UNIQUE (product_id, supplier_id)

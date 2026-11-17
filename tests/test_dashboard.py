@@ -94,3 +94,19 @@ def test_pipeline_shows_connected_agent_and_its_page(conn, tmp_path):
     assert 'class="step off" href="#a3"' in nav                # 3번 미연결
     page2 = html[html.index('id="p-a2"'):html.index('id="p-a3"')]
     assert "품목별 공급처" in page2 and "키캡" in page2
+
+
+def test_supplier_contacts_links_and_v4_score(conn, tmp_path):
+    with conn:
+        pid = db.upsert_product(conn, "키캡", stage="sourcing")
+        a = db.upsert_supplier(conn, "Safe Co", "China", trust="하", trust_reason="58.0점 (C) — 예전 저장 문장",
+                               url="https://safe.example.com/", platform_badge="Alibaba 평점 4.8/5",
+                               contact_email="a@safe.example.com", contact_other="WhatsApp +86 123")
+        b = db.upsert_supplier(conn, "Evil Co", "China", url="javascript:alert(1)")
+        db.link_supplier(conn, pid, a, is_top_pick=1, score=54.0, grade="C")   # v4 칸이 문장보다 우선
+        db.link_supplier(conn, pid, b)
+    html = dashboard.build(tmp_path / "s.html", conn, refs=False).read_text(encoding="utf-8")
+    assert 'href="https://safe.example.com/"' in html and "업체 페이지" in html
+    assert "javascript:alert" not in html                      # http(s)가 아닌 링크는 버림
+    assert "Alibaba 평점 4.8/5" in html and "WhatsApp +86 123" in html and "a@safe.example.com" in html
+    assert "54점 (C)" in html and "예전 저장 문장" in html and "58.0점" not in html

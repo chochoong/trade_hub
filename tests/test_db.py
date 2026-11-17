@@ -160,3 +160,44 @@ def test_migrates_v1_db_by_adding_columns(tmp_path):
     assert conn.execute("SELECT image_url FROM products WHERE id = ?", (pid,)).fetchone()[0] == "https://x/a.jpg"
     conn.close()
     db.connect(path).close()             # 두 번 연결해도 오류 없음
+
+
+# --- 스키마 v4: 품목 기준 공급처 평가 ------------------------------------------------
+def test_link_supplier_v4_fields_store_json(conn):
+    import json
+    with conn:
+        pid = db.upsert_product(conn, "키캡", stage="sourcing")
+        sid = db.upsert_supplier(conn, "Keycap Co", "China")
+        lid = db.link_supplier(conn, pid, sid, score=54.0, grade="C", purchase_mode="small_batch",
+                               score_detail_json={"moq_fit": 10.0, "risk_penalty": -4.0},
+                               trade_terms_json={"lead_time": None, "sample": "1개부터"},
+                               first_questions_json=["단가는?", "배송비는?"], unverified_json=["법인 등기"],
+                               evidence_json=[{"claim": "MOQ 1개", "url": "https://example.com"}])
+    row = conn.execute("SELECT * FROM product_suppliers WHERE id = ?", (lid,)).fetchone()
+    assert (row["score"], row["grade"], row["purchase_mode"]) == (54.0, "C", "small_batch")
+    assert json.loads(row["first_questions_json"]) == ["단가는?", "배송비는?"]
+    assert json.loads(row["evidence_json"])[0]["url"] == "https://example.com"
+    import sqlite3
+    with pytest.raises(sqlite3.IntegrityError):              # 등급은 A~D만
+        with conn:
+            db.link_supplier(conn, pid, sid, grade="E")
+
+
+def test_migration_adds_v4_columns_to_old_db(tmp_path, monkeypatch):
+    import sqlite3
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)          # v3 시절 product_suppliers (v4 칸 없음)
+    old.executescript("""
+        CREATE TABLE product_suppliers (id INTEGER PRIMARY KEY, product_id INTEGER NOT NULL, supplier_id INTEGER NOT NULL,
+            run_id INTEGER, status TEXT NOT NULL DEFAULT 'candidate', is_top_pick INTEGER NOT NULL DEFAULT 0, moq TEXT,
+            unit_price_usd REAL, price_note TEXT, est_landed_krw INTEGER, est_margin_pct REAL, image_url TEXT,
+            reject_reason TEXT, updated_at TEXT, UNIQUE (product_id, supplier_id));
+        INSERT INTO product_suppliers (product_id, supplier_id, moq) VALUES (1, 1, '50 pcs');
+        PRAGMA user_version = 3;""")
+    old.close()
+    conn = db.connect(path)
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(product_suppliers)")}
+    assert {"score", "grade", "first_questions_json", "evidence_json", "purchase_mode"} <= cols
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+    assert conn.execute("SELECT moq, score FROM product_suppliers").fetchone()[:] == ("50 pcs", None)   # 기존 행 보존
+    conn.close()
