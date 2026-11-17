@@ -144,6 +144,26 @@ def web_link(url, label):
     return f'<a href="{e(url)}" target="_blank" rel="noopener noreferrer">{e(label)}</a>'
 
 
+def channel_strip(conn, product_id):
+    """공급처 표 위에 '어느 사이트에서 살까' 순위: 사이트명(검색 링크) + 점수 + 소량 단가. 마우스를 올리면 장단점."""
+    chans = db.latest_channels(conn, product_id)
+    if not chans:
+        return ""
+    items = []
+    for c in chans:
+        name = web_link(c["search_url"], c["site"]) or e(c["site"])
+        price = (f'<span class="small">{e(c["typical_price"])}</span>' if c["typical_price"]
+                 else '<span class="small muted">단가 미확인</span>')
+        tip = " · ".join(x for x in (c["summary"], f'최소 {c["min_qty"]}' if c["min_qty"] else "",
+                                      "웹 평가 못 함 (사이트 고유 점수만)" if c["assessed"] == 0 else "") if x)
+        items.append(f'<li class="ch{" top" if c["rank"] == 1 else ""}{" unassessed" if c["assessed"] == 0 else ""}"'
+                     f' title="{e(tip)}"><span class="ch-rank">{e(c["rank"])}</span>{name}'
+                     f' <b class="ch-score">{num(c["total"], "{:g}점")}</b> {price}</li>')
+    mode = chans[0]["purchase_mode"]
+    return (f'<div class="channels"><span class="small muted">구매 사이트 순위'
+            f'{" (" + e(mode) + " 기준)" if mode else ""}</span><ol>{"".join(items)}</ol></div>')
+
+
 MOQ_BADGE = {"ok": ("소량 OK", "ok"), "over": ("MOQ 초과", "over"), "unknown": ("MOQ 미확인", "unk"),
              "no_limit": ("OEM · 제한 없음", "unk")}
 
@@ -321,6 +341,7 @@ def products_in_progress(conn):
     {photo(p, "big")}<div><b>#{p["id"]} {e(p["name"])}</b> <span class="muted small">{e(last["note"] if last else "")} · {e(last["at"][:16] if last else "")}</span>
     <div class="small">{search_links(p)}</div></div>
     <span class="right">{rep}{sourcing_button(p, bool(sups))}</span></div>
+  {channel_strip(conn, p["id"])}
   {table(["", "공급처", "신뢰도·점수", "상태", "MOQ", "단가", "연락처", "위험 요소"], rows, "tight")}
 </div>""")
     return "".join(cards), len(prods)
@@ -428,6 +449,11 @@ table.tight td{padding:6px 8px}
 .trust{font-weight:700}.t상{color:var(--ok)}.t중{color:var(--warn)}.t하{color:var(--bad)}
 .moq{display:inline-block;font-size:11px;font-weight:600;padding:1px 7px;border-radius:999px;border:1px solid;white-space:nowrap}
 .moq.ok{color:var(--ok)}.moq.over{color:var(--bad)}.moq.unk{color:var(--muted)}
+.channels{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin:8px 0}
+.channels ol{display:flex;flex-wrap:wrap;gap:6px;margin:0;padding:0;list-style:none}
+.ch{display:flex;align-items:baseline;gap:6px;border:1px solid var(--line);border-radius:8px;padding:3px 10px;cursor:default}
+.ch.top{border-color:var(--accent);background:var(--accent-soft)}.ch.unassessed{opacity:.6}
+.ch-rank{font-size:11px;color:var(--muted)}.ch-score{color:var(--accent)}
 .card{border:1px solid var(--line);border-radius:10px;padding:12px;margin:10px 0}
 .card-head{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-bottom:8px}.right{margin-left:auto}
 .pcell{display:flex;gap:10px;align-items:flex-start;min-width:260px}

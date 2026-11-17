@@ -234,3 +234,44 @@ def test_link_supplier_stores_max_order_qty(conn):
         lid = db.link_supplier(conn, pid, sid, purchase_mode="small_batch", max_order_qty=50)
     assert conn.execute("SELECT purchase_mode, max_order_qty FROM product_suppliers WHERE id = ?",
                         (lid,)).fetchone()[:] == ("small_batch", 50)
+
+
+# --- 구매 사이트 순위 (v6) --------------------------------------------------------
+CHANNELS = [
+    {"rank": 1, "key": "aliexpress", "site": "AliExpress", "search_url": "https://www.aliexpress.com/w/wholesale-keycap.html",
+     "total": 82.5, "scores": {"small_qty": 20, "price": 16}, "typical_price": "USD 3.2-4.5", "min_qty": "1 piece",
+     "summary": "1개부터 구매 가능", "site_note": "구매자 보호", "evidence": [{"claim": "1개", "url": "https://x"}],
+     "assessed": True},
+    {"rank": 2, "key": "1688", "site": "1688", "search_url": "https://s.1688.com/x", "total": 61, "scores": {},
+     "typical_price": None, "min_qty": None, "summary": "", "assessed": False},
+]
+
+
+def test_save_channels_and_latest(conn):
+    import json
+    with conn:
+        pid = db.upsert_product(conn, "키캡", stage="sourcing")
+        r1 = conn.execute("INSERT INTO agent_runs (agent) VALUES ('sourcing')").lastrowid
+        assert db.save_channels(conn, pid, r1, CHANNELS, purchase_mode="small_batch") == 2
+        assert db.save_channels(conn, pid, r1, CHANNELS) == 2            # 같은 실행 재저장 → 중복 없음
+    assert conn.execute("SELECT COUNT(*) FROM product_channels").fetchone()[0] == 2
+    top = db.latest_channels(conn, pid)[0]
+    assert (top["site"], top["total"], top["typical_price"], top["assessed"]) == ("AliExpress", 82.5, "USD 3.2-4.5", 1)
+    assert json.loads(top["scores_json"]) == {"small_qty": 20, "price": 16}
+    with conn:                                                           # 새 실행 → 최신 실행분만 보임
+        r2 = conn.execute("INSERT INTO agent_runs (agent) VALUES ('sourcing')").lastrowid
+        db.save_channels(conn, pid, r2, [{"rank": 1, "key": "alibaba", "site": "Alibaba", "total": 70}, "잘못된 항목"])
+    assert [c["site"] for c in db.latest_channels(conn, pid)] == ["Alibaba"]
+    assert db.latest_channels(conn, 999) == []
+
+
+def test_channels_table_created_on_old_db(tmp_path):
+    import sqlite3
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.execute("PRAGMA user_version = 5")
+    old.close()
+    conn = db.connect(path)
+    assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'product_channels'").fetchone()
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+    conn.close()

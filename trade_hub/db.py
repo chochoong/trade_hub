@@ -26,7 +26,7 @@ from pathlib import Path
 
 PKG_DIR = Path(__file__).resolve().parent
 SCHEMA_PATH = PKG_DIR / "schema.sql"
-SCHEMA_VERSION = 5   # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
+SCHEMA_VERSION = 6   # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
 # 버전별로 추가된 컬럼: 예전 DB에는 connect() 때 ALTER TABLE로 붙인다 (새 DB는 schema.sql에 이미 있음)
 
 
@@ -46,6 +46,7 @@ MIGRATIONS = {
         ("product_suppliers", "unverified_json", _json_col("unverified_json")),
         ("product_suppliers", "evidence_json", _json_col("evidence_json"))],
     5: [("product_suppliers", "max_order_qty", "INTEGER")],
+    6: [],   # product_channels 테이블 추가 (새 테이블은 schema.sql의 CREATE TABLE IF NOT EXISTS로 예전 DB에도 생김)
 }
 
 STAGES = ["candidate", "sourcing", "negotiating", "sampling", "ordered", "shipping", "selling", "closed"]
@@ -205,6 +206,38 @@ LINK_FIELDS = {"is_top_pick", "moq", "unit_price_usd", "price_note", "est_landed
                # v4: 2번이 이 품목 기준으로 평가한 결과. *_json 필드는 list/dict를 그대로 넘기면 JSON으로 저장
                "score", "grade", "score_detail_json", "purchase_mode", "trade_terms_json", "first_questions_json",
                "unverified_json", "evidence_json", "max_order_qty"}
+
+def save_channels(conn, product_id, run_id, channels, purchase_mode=None):
+    """2번 results.json의 channels(구매 사이트 순위)를 product_channels에 저장한다. 저장한 행 수를 돌려준다.
+    같은 (품목, 실행)으로 다시 저장하면 그 실행분을 통째로 바꾼다 (재저장해도 중복 없음).
+    channels 항목: {rank, key, site, search_url, total, scores, typical_price, min_qty, summary, site_note, evidence, assessed}"""
+    conn.execute("DELETE FROM product_channels WHERE product_id = ? AND run_id IS ?", (product_id, run_id))
+    n = 0
+    for i, c in enumerate(channels or [], 1):
+        if not isinstance(c, dict) or not (c.get("key") or c.get("site")):
+            continue
+        assessed = c.get("assessed")
+        conn.execute(
+            "INSERT INTO product_channels (product_id, run_id, rank, site_key, site, search_url, total, scores_json,"
+            " typical_price, min_qty, summary, site_note, evidence_json, assessed, purchase_mode)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (product_id, run_id, c.get("rank") or i, str(c.get("key") or c.get("site")), str(c.get("site") or c.get("key")),
+             c.get("search_url"), c.get("total"), dumps(c.get("scores") or None), c.get("typical_price"),
+             c.get("min_qty"), c.get("summary") or None, c.get("site_note"), dumps(c.get("evidence") or None),
+             None if assessed is None else int(bool(assessed)), purchase_mode))
+        n += 1
+    return n
+
+
+def latest_channels(conn, product_id):
+    """품목의 가장 최근 실행분 사이트 순위 (순위순)."""
+    last = conn.execute("SELECT run_id FROM product_channels WHERE product_id = ? ORDER BY id DESC LIMIT 1",
+                        (product_id,)).fetchone()
+    if last is None:
+        return []
+    return conn.execute("SELECT * FROM product_channels WHERE product_id = ? AND run_id IS ? ORDER BY rank, id",
+                        (product_id, last["run_id"])).fetchall()
+
 
 # MOQ 판단 기준: max_order_qty가 비어 있으면 구매 방식 기본값 (oem = 제한 없음), 구매 방식도 모르면 50
 DEFAULT_MAX_ORDER_QTY = {"retail": 10, "small_batch": 50, "oem": None}

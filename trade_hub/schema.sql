@@ -310,6 +310,28 @@ CREATE TABLE IF NOT EXISTS tasks (
     done_at     TEXT
 );
 
+-- 구매 사이트 순위 (2번): "이 품목을 어느 사이트에서 사는 게 좋은가". 실행마다 사이트별 1행 → 최신 실행분을 보여준다.
+-- 점수 = 항목별 평가 × 구매 방식별 가중치 (trade_sourcing_agent/config/channels.yaml), 100점 만점  [v6]
+CREATE TABLE IF NOT EXISTS product_channels (
+    id             INTEGER PRIMARY KEY,
+    product_id     INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    run_id         INTEGER REFERENCES agent_runs(id),
+    rank           INTEGER,                   -- 그 실행 안의 순위 (1 = 추천)
+    site_key       TEXT NOT NULL,             -- aliexpress / alibaba / 1688 ...
+    site           TEXT NOT NULL,             -- 표시 이름 (AliExpress, Alibaba (Ready to Ship) ...)
+    search_url     TEXT,                      -- 그 사이트에서 이 품목 검색 결과 링크
+    total          REAL,                      -- 총점 (100점 만점)
+    scores_json    TEXT CHECK (scores_json IS NULL OR json_valid(scores_json)),       -- {"small_qty":20, "price":16, ...}
+    typical_price  TEXT,                      -- 소량 구매 기준 단가 범위 원문 (예: "USD 3.2-4.5")
+    min_qty        TEXT,                      -- 최소 구매 수량 원문 (예: "1 piece")
+    summary        TEXT,                      -- 이 사이트에서 살 때의 장단점
+    site_note      TEXT,                      -- 사이트 고유 설명 (품목 무관)
+    evidence_json  TEXT CHECK (evidence_json IS NULL OR json_valid(evidence_json)),   -- [{"claim":"...","url":"..."}]
+    assessed       INTEGER CHECK (assessed IS NULL OR assessed IN (0, 1)),            -- 0 = 웹 평가 못 함 (사이트 고유 점수만)
+    purchase_mode  TEXT,                      -- 평가 기준 구매 방식: retail / small_batch / oem
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime'))
+);
+
 -- 슈퍼바이저 스케줄러가 다른 에이전트를 실행한 기록 (supervisor.json의 명령을 subprocess로 실행)
 CREATE TABLE IF NOT EXISTS supervisor_dispatches (
     id           INTEGER PRIMARY KEY,
@@ -340,6 +362,7 @@ CREATE INDEX IF NOT EXISTS idx_products_stage        ON products(stage);
 CREATE INDEX IF NOT EXISTS idx_events_product        ON product_events(product_id, at);
 CREATE INDEX IF NOT EXISTS idx_scores_product        ON product_scores(product_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_ps_product            ON product_suppliers(product_id, status);
+CREATE INDEX IF NOT EXISTS idx_channels_product      ON product_channels(product_id, run_id, rank);
 CREATE INDEX IF NOT EXISTS idx_messages_ps           ON messages(product_supplier_id, status);
 CREATE INDEX IF NOT EXISTS idx_quotes_ps             ON quotes(product_supplier_id);
 CREATE INDEX IF NOT EXISTS idx_shipments_status      ON shipments(status);

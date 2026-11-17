@@ -124,3 +124,28 @@ def test_supplier_moq_badges(conn, tmp_path):
     assert '<span class="moq ok" title="기준: 50개 이하 · 기본값 · MOQ 1개">소량 OK</span>' in html
     assert '<span class="moq over" title="기준: 10개 이하 (retail) · 기본값 · MOQ 25개">MOQ 초과</span>' in html
     assert ">MOQ 미확인</span>" in html and ">OEM · 제한 없음</span>" in html
+
+
+def test_channel_ranking_above_supplier_table(conn, tmp_path):
+    with conn:
+        pid = db.upsert_product(conn, "키캡", stage="sourcing")
+        db.save_channels(conn, pid, None, [
+            {"rank": 1, "key": "aliexpress", "site": "AliExpress", "search_url": "https://ali.example.com/w/keycap",
+             "total": 82.5, "typical_price": "USD 3.2-4.5", "min_qty": "1 piece", "summary": "1개부터", "assessed": True},
+            {"rank": 2, "key": "evil", "site": "Evil <Site>", "search_url": "javascript:alert(1)", "total": 40,
+             "assessed": False}], purchase_mode="small_batch")
+        db.link_supplier(conn, pid, db.upsert_supplier(conn, "Keys Co", "China"), moq="1 piece")
+    html = dashboard.build(tmp_path / "c.html", conn, refs=False).read_text(encoding="utf-8")
+    card = html[html.index(f'id="prod-{pid}"'):]
+    assert card.index("구매 사이트 순위") < card.index("Keys Co")          # 공급처 표 위
+    assert "(small_batch 기준)" in card
+    assert 'href="https://ali.example.com/w/keycap"' in card and "82.5점" in card and "USD 3.2-4.5" in card
+    assert 'title="1개부터 · 최소 1 piece"' in card
+    assert "javascript:alert" not in html and "Evil &lt;Site&gt;" in card and "단가 미확인" in card
+
+
+def test_no_channel_strip_without_data(conn, tmp_path):
+    with conn:
+        db.upsert_product(conn, "키캡", stage="sourcing")
+    html = dashboard.build(tmp_path / "n.html", conn, refs=False).read_text(encoding="utf-8")
+    assert "구매 사이트 순위" not in html
