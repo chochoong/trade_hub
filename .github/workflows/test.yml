@@ -1,0 +1,25 @@
+# 푸시·PR마다 테스트 실행. 테스트는 매번 임시 DB를 쓰고 LLM·네이버 API를 호출하지 않으므로 키가 필요 없다.
+# 실제 운영 PC가 Windows라 Windows와 Linux 둘 다 돌린다 (프로세스 종료·파일 잠금이 OS별로 다름).
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 설치
+        run: python -m pip install -e ".[dev]"
+      - name: 테스트
+        run: python -m pytest -q

@@ -67,6 +67,68 @@ def test_decide_when_sql_error(conn):
     assert not due and "when_sql 오류" in reason
 
 
+# --- 실패 후 재시도 (E) ----------------------------------------------------------
+def add_dispatch(conn, agent, hours_ago, exit_code):
+    with conn:
+        conn.execute("INSERT INTO supervisor_dispatches (agent, command, exit_code, started_at, finished_at)"
+                     " VALUES (?, 'x', ?, ?, ?)", (agent, exit_code, ts(hours_ago), ts(hours_ago)))
+
+
+WEEKLY = {**SPEC, "every_hours": 168}
+
+
+def test_failure_streak(conn):
+    assert sv.failure_streak(conn, "discover") == 0
+    add_run(conn, "discover", hours_ago=50)                      # 성공
+    add_run(conn, "discover", hours_ago=40, status="failed")     # 직접 실행에서 실패
+    assert sv.failure_streak(conn, "discover") == 1
+    add_dispatch(conn, "discover", hours_ago=30, exit_code=1)
+    add_dispatch(conn, "discover", hours_ago=20, exit_code=-1)   # 시간 초과
+    assert sv.failure_streak(conn, "discover") == 2
+    add_dispatch(conn, "discover", hours_ago=10, exit_code=0)    # 성공하면 초기화
+    assert sv.failure_streak(conn, "discover") == 0
+
+
+def test_retry_after_failure_without_waiting_for_period(conn):
+    add_run(conn, "discover", hours_ago=1, status="failed")
+    due, reason = sv.decide(conn, "discover", WEEKLY, NOW)
+    assert not due and "재시도" in reason                         # 아직 3시간 안 됨
+    add_run(conn, "discover", hours_ago=200)                     # (이전 성공)
+    with conn:
+        conn.execute("UPDATE agent_runs SET started_at = ? WHERE status = 'failed'", (ts(4),))
+    due, reason = sv.decide(conn, "discover", WEEKLY, NOW)
+    assert due and "재시도 1/2" in reason                          # 주기(168시간)를 기다리지 않음
+
+
+def test_retry_respects_custom_settings(conn):
+    add_run(conn, "discover", hours_ago=4, status="failed")
+    assert sv.decide(conn, "discover", {**WEEKLY, "retry_hours": 6}, NOW)[0] is False
+    assert sv.decide(conn, "discover", {**WEEKLY, "retry_hours": 1}, NOW)[0] is True
+
+
+def test_halts_after_max_retries_until_success(conn):
+    for h in (12, 8, 4):
+        add_dispatch(conn, "discover", hours_ago=h, exit_code=1)
+    due, reason = sv.decide(conn, "discover", WEEKLY, NOW)
+    assert not due and "자동 실행 멈춤" in reason
+    alerts = [a["text"] for a in sv.rule_alerts(conn, cfg(discover=WEEKLY), sv.snapshot(conn), now=NOW)]
+    assert any("자동 실행을 멈췄습니다" in t for t in alerts)
+    add_run(conn, "discover", hours_ago=1)                       # 사람이 직접 실행해 성공
+    assert sv.decide(conn, "discover", WEEKLY, NOW)[0] is False   # 정상 주기로 복귀 (168시간 뒤)
+    assert sv.failure_streak(conn, "discover") == 0
+
+
+def test_when_sql_agent_retries_only_if_work_remains(conn):
+    spec = {"enabled": True, "command": ["x"], "min_interval_hours": 6,
+            "when_sql": "SELECT COUNT(*) FROM products WHERE stage = 'sourcing'"}
+    add_run(conn, "sourcing", hours_ago=4, status="failed")
+    assert sv.decide(conn, "sourcing", spec, NOW) == (False, "처리할 항목 없음")
+    with conn:
+        db.set_stage(conn, db.upsert_product(conn, "선반"), "sourcing")
+    due, reason = sv.decide(conn, "sourcing", spec, NOW)
+    assert due and "재시도" in reason                               # min_interval(6h)보다 재시도(3h)가 먼저
+
+
 # --- 실행 ---------------------------------------------------------------------
 def test_dispatch_records_exit_code(conn, tmp_path, monkeypatch):
     monkeypatch.setattr(sv, "LOG_DIR", tmp_path / "logs")

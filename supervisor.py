@@ -72,6 +72,28 @@ def is_running(conn, agent, timeout_minutes, now):
     return bool(r or d)
 
 
+DEFAULT_RETRY_HOURS = 3
+DEFAULT_MAX_RETRIES = 2
+
+
+def failure_streak(conn, agent):
+    """마지막 성공 이후 연속 실패 횟수 (0이면 마지막 시도가 성공했거나 기록 없음).
+    슈퍼바이저가 실행해 실패한 횟수를 세고, 직접 실행(슈퍼바이저 밖)에서 실패한 것만 있으면 1로 본다."""
+    ok_run = conn.execute("SELECT MAX(started_at) FROM agent_runs WHERE agent = ? AND status = 'succeeded'",
+                          (agent,)).fetchone()[0]
+    ok_disp = conn.execute("SELECT MAX(started_at) FROM supervisor_dispatches WHERE agent = ? AND exit_code = 0",
+                           (agent,)).fetchone()[0]
+    last_ok = max(filter(None, (ok_run, ok_disp)), default="")
+    failed_disp = conn.execute(
+        "SELECT COUNT(*) FROM supervisor_dispatches WHERE agent = ? AND exit_code <> 0 AND started_at > ?",
+        (agent, last_ok)).fetchone()[0]
+    if failed_disp:
+        return failed_disp
+    failed_run = conn.execute("SELECT 1 FROM agent_runs WHERE agent = ? AND status = 'failed' AND started_at > ?",
+                              (agent, last_ok)).fetchone()
+    return 1 if failed_run else 0
+
+
 def decide(conn, name, spec, now):
     """(실행할지, 사유)를 돌려준다."""
     if not spec.get("enabled"):
@@ -82,11 +104,27 @@ def decide(conn, name, spec, now):
         return False, "실행 중"
     last = last_activity(conn, name)
     since = hours_since(last, now)
+    n = None
     if spec.get("when_sql"):
         try:
             n = conn.execute(spec["when_sql"]).fetchone()[0] or 0
         except Exception as e:
             return False, f"when_sql 오류: {e}"
+
+    # 실패 후 재시도: 주기를 기다리지 않고 retry_hours 뒤 다시. max_retries번 넘게 연속 실패하면 자동 실행을 멈춘다
+    # (API 장애 등으로 비용만 반복되지 않게). 직접 실행해 한 번 성공하면 다시 자동 실행된다.
+    streak = failure_streak(conn, name)
+    if streak:
+        max_retries = spec.get("max_retries", DEFAULT_MAX_RETRIES)
+        retry_h = spec.get("retry_hours", DEFAULT_RETRY_HOURS)
+        if streak > max_retries:
+            return False, f"연속 실패 {streak}회 → 자동 실행 멈춤 (로그 확인 후 직접 실행해 성공하면 다시 시작)"
+        if n is None or n > 0:
+            if since is None or since >= retry_h:
+                return True, f"실패 후 재시도 {streak}/{max_retries} (마지막 시도 {since or 0:.0f}시간 전)"
+            return False, f"실패 → {retry_h - since:.1f}시간 뒤 재시도 ({streak}/{max_retries})"
+
+    if n is not None:
         if n > 0:
             min_h = spec.get("min_interval_hours", 1)
             if since is not None and since < min_h:
@@ -345,6 +383,9 @@ def rule_alerts(conn, cfg, snap, now=None):
             add("warn", f"'{o['name']}' × {o['company']} 추정 마진 {o['est_margin_pct']}% (기준 {a['low_margin_pct']}% 미만)",
                 o["product_id"])
     for name, spec in cfg["agents"].items():
+        streak = failure_streak(conn, name) if spec.get("enabled") else 0
+        if streak > spec.get("max_retries", DEFAULT_MAX_RETRIES):
+            add("warn", f"{name} 에이전트가 연속 {streak}회 실패해 자동 실행을 멈췄습니다 → 로그 확인 후 직접 실행 필요")
         every = spec.get("every_hours")
         if spec.get("enabled") and every is not None:
             since = hours_since(last_activity(conn, name), now)
