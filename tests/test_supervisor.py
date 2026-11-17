@@ -84,6 +84,61 @@ def test_dispatch_missing_folder(conn, tmp_path, monkeypatch):
     assert sv.dispatch(conn, None, "discover", spec, "테스트", log=lambda *_: None) == -2
 
 
+def test_dispatch_timeout_kills_child_tree_and_marks_run_failed(conn, tmp_path, monkeypatch):
+    """시간 초과 시 에이전트가 띄운 손자 프로세스까지 종료되고, 'running'으로 남은 실행은 실패로 정리된다."""
+    import sys
+    import time
+    monkeypatch.setattr(sv, "LOG_DIR", tmp_path / "logs")
+    beat = tmp_path / "heartbeat.txt"
+    grandchild = f"import time\nwhile True:\n    open(r'{beat}', 'a').write('.')\n    time.sleep(0.1)\n"
+    agent = (
+        "import subprocess, sys, time\n"
+        "from trade_hub import db\n"
+        f"subprocess.Popen([sys.executable, '-c', {grandchild!r}])\n"
+        "conn = db.connect()\n"
+        "with db.agent_run(conn, 'discover'):\n"
+        "    time.sleep(60)\n"
+    )
+    spec = {"command": ["{python}", "-c", agent], "cwd": ".", "timeout_minutes": 3 / 60}   # 3초
+    assert sv.dispatch(conn, None, "discover", spec, "테스트", log=lambda *_: None) == -1
+
+    time.sleep(0.5)
+    size = beat.stat().st_size
+    time.sleep(1)
+    assert beat.stat().st_size == size, "손자 프로세스가 아직 살아 있음"
+    row = conn.execute("SELECT status, error FROM agent_runs WHERE agent = 'discover'").fetchone()
+    assert row["status"] == "failed" and "슈퍼바이저" in row["error"]
+
+
+def test_dispatch_success_leaves_other_runs_alone(conn, tmp_path, monkeypatch):
+    monkeypatch.setattr(sv, "LOG_DIR", tmp_path / "logs")
+    add_run(conn, "discover", hours_ago=0, status="running")   # 바깥에서 직접 실행 중인 것
+    spec = {"command": ["{python}", "-c", "pass"], "cwd": "."}
+    assert sv.dispatch(conn, None, "discover", spec, "테스트", log=lambda *_: None) == 0
+    assert conn.execute("SELECT status FROM agent_runs").fetchone()[0] == "running"
+
+
+def test_cleanup_stale_runs(conn):
+    old = add_run(conn, "discover", hours_ago=10, status="running")
+    recent = add_run(conn, "sourcing", hours_ago=1, status="running")
+    done = add_run(conn, "costing", hours_ago=10, status="succeeded")
+    assert sv.cleanup_stale_runs(conn, 6, now=NOW, log=lambda *_: None) == 1
+    status = dict(conn.execute("SELECT id, status FROM agent_runs").fetchall())
+    assert status == {old: "failed", recent: "running", done: "succeeded"}
+
+
+def test_single_instance_lock(tmp_path):
+    lock = tmp_path / "supervisor.lock"
+    with sv.single_instance(lock) as first:
+        assert first is True
+        import subprocess, sys
+        probe = ("import sys, supervisor as sv\n"
+                 f"with sv.single_instance(r'{lock}') as ok:\n    sys.exit(0 if ok else 7)\n")
+        assert subprocess.run([sys.executable, "-c", probe], cwd=sv.ROOT).returncode == 7   # 다른 프로세스는 못 잡음
+    with sv.single_instance(lock) as again:
+        assert again is True                                                                 # 풀린 뒤에는 다시 잡힘
+
+
 # --- 검토관 -------------------------------------------------------------------
 def test_rule_alerts(conn):
     add_run(conn, "discover", hours_ago=1, status="failed")

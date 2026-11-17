@@ -23,6 +23,7 @@ import json
 import os
 import subprocess
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -105,29 +106,116 @@ def dispatch(conn, run_id, name, spec, reason, log=print):
     cwd = (ROOT / spec.get("cwd", ".")).resolve()
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = LOG_DIR / f"{datetime.now():%Y%m%d_%H%M%S}_{name}.log"
+    started = trade_db.now()
     with conn:
         did = conn.execute(
-            "INSERT INTO supervisor_dispatches (run_id, agent, reason, command, log_path) VALUES (?, ?, ?, ?, ?)",
-            (run_id, name, reason, subprocess.list2cmdline(cmd), str(log_path))).lastrowid
+            "INSERT INTO supervisor_dispatches (run_id, agent, reason, command, log_path, started_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (run_id, name, reason, subprocess.list2cmdline(cmd), str(log_path), started)).lastrowid
     env = {**os.environ, "PYTHONIOENCODING": "utf-8", "TRADE_DB": str(trade_db.default_path().resolve())}
+    timeout_min = spec.get("timeout_minutes", 60)
     log(f"  ▶ {name} 실행: {reason}")
-    try:
-        with open(log_path, "w", encoding="utf-8") as f:
-            code = subprocess.run(cmd, cwd=cwd, env=env, stdout=f, stderr=subprocess.STDOUT,
-                                  timeout=spec.get("timeout_minutes", 60) * 60).returncode
-    except subprocess.TimeoutExpired:
-        code = -1
-        log(f"    ✗ 시간 초과 ({spec.get('timeout_minutes', 60)}분)")
-    except OSError as e:   # 명령·폴더 없음 등
-        code = -2
-        with open(log_path, "a", encoding="utf-8") as f:
+    with open(log_path, "w", encoding="utf-8") as f:
+        try:
+            proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=f, stderr=subprocess.STDOUT, **_new_group())
+        except OSError as e:   # 명령·폴더 없음 등
+            code = -2
             f.write(f"\n[supervisor] 실행 실패: {e}\n")
-        log(f"    ✗ 실행 실패: {e}")
+            log(f"    ✗ 실행 실패: {e}")
+        else:
+            try:
+                code = proc.wait(timeout=timeout_min * 60)
+            except subprocess.TimeoutExpired:
+                kill_tree(proc)        # 에이전트가 띄운 하위 프로세스까지 함께 종료
+                code = -1
+                f.write(f"\n[supervisor] 시간 초과 ({timeout_min}분) → 강제 종료\n")
+                log(f"    ✗ 시간 초과 ({timeout_min}분) → 강제 종료")
     with conn:
         conn.execute("UPDATE supervisor_dispatches SET exit_code = ?, finished_at = ? WHERE id = ?",
                      (code, trade_db.now(), did))
+        if code != 0:
+            # 강제 종료·비정상 종료로 에이전트가 실패를 못 남기고 'running'으로 남은 실행을 정리
+            n = conn.execute(
+                "UPDATE agent_runs SET status = 'failed', error = ?, finished_at = ? "
+                "WHERE agent = ? AND status = 'running' AND started_at >= ?",
+                (f"슈퍼바이저: 종료 코드 {code}로 끝났는데 실행 기록이 'running'으로 남아 실패 처리",
+                 trade_db.now(), name, started)).rowcount
+            if n:
+                log(f"    · 'running'으로 남은 {name} 실행 {n}건을 실패로 정리")
     log(f"    {'✓ 완료' if code == 0 else f'✗ 종료 코드 {code}'} · 로그: {log_path}")
     return code
+
+
+def _new_group():
+    """에이전트를 별도 프로세스 그룹으로 실행 (시간 초과 시 하위 프로세스까지 한꺼번에 종료하려고)."""
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+def kill_tree(proc):
+    """proc와 그 하위 프로세스를 모두 종료하고 끝날 때까지 기다린다."""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            import signal
+            os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
+def cleanup_stale_runs(conn, hours, now=None, log=print):
+    """hours시간 넘게 'running'인 실행 기록을 실패로 정리한다 (슈퍼바이저 밖에서 실행됐다가 죽은 경우 등).
+    정리한 건수를 돌려준다."""
+    now = now or datetime.now()
+    cutoff = (now - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%S")
+    with conn:
+        n = conn.execute(
+            "UPDATE agent_runs SET status = 'failed', error = ?, finished_at = ? "
+            "WHERE status = 'running' AND started_at < ?",
+            (f"슈퍼바이저: {hours}시간 넘게 'running' 상태라 비정상 종료로 보고 실패 처리",
+             now.strftime("%Y-%m-%dT%H:%M:%S"), cutoff)).rowcount
+    if n:
+        log(f"  · {hours}시간 넘게 'running'으로 남은 실행 {n}건을 실패로 정리")
+    return n
+
+
+@contextmanager
+def single_instance(lock_path):
+    """슈퍼바이저가 동시에 두 개 돌지 않게 하는 잠금. 이미 잡혀 있으면 False를 내준다.
+    OS 파일 잠금이라 프로세스가 죽으면 자동으로 풀린다."""
+    lock_path = Path(lock_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    f = open(lock_path, "a+")
+    try:
+        f.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            f.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    finally:
+        f.close()
 
 
 def schedule(conn, cfg, run_id=None, dry_run=False, log=print):
@@ -414,16 +502,23 @@ def main():
             print(f"▶ 검토: {'예정' if review_due(conn, cfg, datetime.now()) and not args.no_review else '없음'}")
         return
 
-    with trade_db.agent_run(conn, "supervisor", args={"cmd": args.cmd, "no_llm": args.no_llm}) as run:
-        if args.cmd == "tick":
-            run_backup(conn, cfg)     # 에이전트 실행 전에 하루 1번
-        if args.cmd in ("tick", "schedule"):
-            print("▶ 스케줄")
-            schedule(conn, cfg, run.id)
-        if args.cmd == "review" or (args.cmd == "tick" and not args.no_review and review_due(conn, cfg, datetime.now())):
-            print("▶ 검토")
-            bid, summary, alerts, suggestions = review(conn, cfg, run.id, use_llm=not args.no_llm)
-            print_review(summary, alerts, suggestions)
+    # 작업 스케줄러가 1시간마다 띄우므로, 이전 tick이 아직 돌고 있으면 겹쳐 실행하지 않는다
+    with single_instance(trade_db.default_path().parent / "supervisor.lock") as acquired:
+        if not acquired:
+            print("· 다른 슈퍼바이저가 실행 중이라 건너뜀")
+            return
+        cleanup_stale_runs(conn, cfg["alerts"].get("run_stuck_hours", 6))
+        with trade_db.agent_run(conn, "supervisor", args={"cmd": args.cmd, "no_llm": args.no_llm}) as run:
+            if args.cmd == "tick":
+                run_backup(conn, cfg)     # 에이전트 실행 전에 하루 1번
+            if args.cmd in ("tick", "schedule"):
+                print("▶ 스케줄")
+                schedule(conn, cfg, run.id)
+            if args.cmd == "review" or (args.cmd == "tick" and not args.no_review
+                                         and review_due(conn, cfg, datetime.now())):
+                print("▶ 검토")
+                bid, summary, alerts, suggestions = review(conn, cfg, run.id, use_llm=not args.no_llm)
+                print_review(summary, alerts, suggestions)
 
 
 if __name__ == "__main__":

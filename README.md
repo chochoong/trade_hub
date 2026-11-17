@@ -54,8 +54,10 @@ python supervisor.py backup          # 공용 DB 백업 (tick에서 하루 1번 
 **① 스케줄러 (코드, LLM 없음)** — `supervisor.json`의 에이전트를 규칙대로 실행
 - `every_hours`: 마지막 실행 후 N시간이 지나면 실행
 - `when_sql`: 공용 DB에 처리할 일이 있으면 실행 (`min_interval_hours`로 과도한 재실행 방지)
-- 실행 중이면 건너뛰고 `timeout_minutes`가 지나면 중단. 기록은 `supervisor_dispatches`, 출력은 `data/logs/`
+- 실행 중이면 건너뛰고 `timeout_minutes`가 지나면 하위 프로세스까지 강제 종료하고, `running`으로 남은 실행 기록은 실패로 정리. 기록은 `supervisor_dispatches`, 출력은 `data/logs/`
 - 실행할 때 환경변수 `TRADE_DB`로 공용 DB 경로를 넘김
+
+- tick이 겹치지 않도록 잠금(`data/supervisor.lock`)을 쓰고, `run_stuck_hours`(기본 6시간) 넘게 `running`인 실행 기록은 실패로 정리
 
 **② 검토관 (LLM, 읽기 전용)** — 공용 DB 전체를 읽고 브리핑
 - 규칙 경고: 실패한 실행, 오래 대기 중인 할 일, 진행 없는 품목, 방치된 고득점 후보, 낮은 마진, 오래 안 돈 에이전트
