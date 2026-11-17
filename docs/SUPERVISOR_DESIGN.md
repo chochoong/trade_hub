@@ -14,7 +14,7 @@
 | # | agent 이름 | 역할 | 프로젝트 | 공용 DB 연결 |
 |---|---|---|---|---|
 | 1 | `discover` | 시장조사·아이템 발굴 | `../supplier_agent` | ✅ 연결됨 |
-| 2 | `sourcing` | 공급처 발굴 | `../trade_sourcing_agent` | ❌ 파일 출력(`output/`)만 |
+| 2 | `sourcing` | 공급처 발굴 | `../trade_sourcing_agent` | ✅ 연결됨 (`python -m sourcing_agent from-db`, 7장) |
 | 3 | `negotiation` | 커뮤니케이션·협상 (메일은 초안만) | 미정 | - |
 | 4 | `documents` | 무역서류 (PI·CI·PL·계약서) | 미정 | - |
 | 5 | `compliance` | 통관·규제 체크 | 미정 | - |
@@ -48,7 +48,7 @@
 - 각 에이전트는 `pip install -e ../trade_hub` 후 `from trade_hub import db` → `db.connect()`.
   WAL 모드, `foreign_keys=ON`, 연결할 때마다 스키마 적용(`IF NOT EXISTS`).
 - **스키마 변경은 `trade_hub`에서만**, 그리고 **컬럼·테이블 추가만** 허용한다(다른 에이전트가 깨지지 않게).
-  변경 시 `SCHEMA_VERSION`을 올리고 `connect()`에 `ALTER` 마이그레이션을 넣는다. 아직 마이그레이션은 없다(user_version=1).
+  변경 시 `SCHEMA_VERSION`을 올리고 `db.MIGRATIONS`에 추가 컬럼을 적는다(`connect()`가 예전 DB에 `ALTER TABLE`). 현재 **v3** (7장).
 - 시각은 로컬 시간 ISO 문자열(`YYYY-MM-DDTHH:MM:SS`), 금액은 `_krw` 정수 / `_usd` 실수, JSON은 TEXT(+`json_valid` 검사).
 
 ### 3.2 모든 에이전트가 지키는 것 (슈퍼바이저 판단의 근거)
@@ -118,8 +118,8 @@ subprocess로 순차 실행. 환경변수 `PYTHONIOENCODING=utf-8`, `TRADE_DB` �
   "agents": {
     "discover": {"enabled": true, "command": ["{python}", "supplier_agent.py", "--count", "10", "--no-open"],
                  "cwd": "../supplier_agent", "every_hours": 168, "timeout_minutes": 30},
-    "sourcing": {"enabled": false, "command": ["{python}", "..."], "cwd": "../trade_sourcing_agent",
-                 "when_sql": "SELECT COUNT(*) FROM products p WHERE p.stage='sourcing' AND NOT EXISTS (SELECT 1 FROM product_suppliers ps WHERE ps.product_id=p.id)",
+    "sourcing": {"enabled": false, "command": ["{python}", "-m", "sourcing_agent", "from-db"], "cwd": "../trade_sourcing_agent",
+                 "when_sql": "SELECT COUNT(*) FROM products p WHERE p.stage='sourcing' AND NOT EXISTS (SELECT 1 FROM product_suppliers ps WHERE ps.product_id=p.id) AND NOT EXISTS (SELECT 1 FROM product_events e JOIN agent_runs r ON r.id=e.run_id WHERE e.product_id=p.id AND r.agent='sourcing')",
                  "min_interval_hours": 6, "timeout_minutes": 60}
   },
   "review": {"enabled": true, "every_hours": 20, "provider": null, "model": null},
@@ -153,16 +153,13 @@ subprocess로 순차 실행. 환경변수 `PYTHONIOENCODING=utf-8`, `TRADE_DB` �
 
 ## 5. 알려진 한계·남은 일
 
-- **연결된 에이전트가 1번뿐**이라 스케줄러의 `when_sql`·검토관의 단계 간 판단은 아직 실제로 쓰이지 않는다.
-  2번(`trade_sourcing_agent`)에 DB 입출력 추가가 다음 순서: `stage='sourcing'`이고 공급처 없는 품목을 읽어 처리하고,
-  결과를 `suppliers`·`product_suppliers`에 저장(기존 파일 출력은 유지). 공급처 저장 헬퍼(`upsert_supplier` 등)는
-  `trade_hub/db.py`에 공용으로 추가할 것(현재 없음).
+- 연결된 에이전트는 1·2번. 2번은 DB 연동이 끝났지만 **슈퍼바이저 자동 실행은 아직 꺼져 있다**(7.2 — 실행 파이썬 문제).
 - 다른 에이전트의 실행 명령이 확정되지 않아 `supervisor.json` 예시의 `command`·`cwd`는 가정값.
 - 실행은 순차(병렬 없음). 한 tick에서 오래 걸리는 에이전트가 있으면 다음 에이전트가 늦어진다.
 - 비정상 종료로 `agent_runs.status='running'`이 남으면 `timeout_minutes` 동안 그 에이전트를 건너뛰고, 이후 검토관이 경고한다(자동 정리는 없음).
 - `when_sql`은 설정 파일의 SQL을 그대로 실행한다(신뢰된 로컬 설정 전제).
 - 검토관 제안의 중복 판단은 "같은 제목의 대기 중 할 일" 기준이라, 제목이 조금 달라지면 비슷한 할 일이 쌓일 수 있다.
-- 대시보드 없음: 현재는 `trade_hub` CLI(`summary`/`tasks`/`done`/`briefing`)로만 본다.
+- 대시보드: `trade_hub dashboard`(정적 HTML, 7.4). 브라우저 업로드·버튼은 아직 없음(CLI로 처리).
 - hub에 자동 테스트 없음(지금까지는 스크래치 DB로 수동 검증).
 
 ## 6. 검증 방법 (실제 DB를 건드리지 않고)
@@ -174,3 +171,66 @@ python supervisor.py tick --no-llm --config test.json   # 가짜 명령(python -
 python supervisor.py review                   # LLM 브리핑 1회 (비용 소액)
 trade_hub summary / tasks / briefing
 ```
+
+---
+
+## 7. 변경 사항 (2026-11-17) — 슈퍼바이저가 알아야 할 것
+
+### 7.1 2번(sourcing) 공용 DB 연결
+- 명령: `python -m sourcing_agent from-db [품목번호 ...] [--type small_batch|oem] [--max-qty 50] [--dry-run]`
+  (cwd `../trade_sourcing_agent`). 번호를 생략하면 **아직 조사하지 않은 sourcing 품목 전부**.
+- 읽는 것: `products`(stage='sourcing'), 최신 `product_scores.est_fob_usd`. 1번이 넘긴 이름·영어 검색어·시세·선정 이유·
+  예상 규제·위험 요소로 소싱 조건을 만든다(YAML 파일 불필요).
+- 쓰는 것 (`agent_runs`에 `sourcing`으로 1행):
+  - `suppliers` / `product_suppliers` — 품목당 검증한 공급처(보통 5곳), 상위 3곳 `is_top_pick=1`.
+    `suppliers.trust`는 2번 등급 A→상, B→중, C·D→하. `trust_reason`은 `"<점수>점 (<등급>) — 요약"` 형식.
+  - `tasks` — kind=`decision`, `"[품목] 공급처 N곳 검토 — 연락할 곳 고르기"`(priority 2), 0곳이면 `"공급처를 찾지 못함 …"`(priority 1).
+    `detail` = 리포트 경로(`output/<실행폴더>/report.html`).
+  - `product_events` — `from_stage = to_stage = 'sourcing'`, note `"공급처 조사: N곳"` (**단계 변경이 아닌 조사 기록**).
+- **단계는 바꾸지 않는다.** 공급처를 골라 협상으로 넘기는 건 사람/3번.
+- **재실행 방지**: 이미 sourcing 실행 기록(`product_events` + `agent_runs.agent='sourcing'`)이 있는 품목은
+  공급처 0곳이어도 자동으로 다시 돌리지 않는다(API 비용 반복 방지). 다시 하려면 번호를 지정해 수동 실행.
+- 실패 처리: 품목을 순서대로 처리하며 각 품목 결과는 바로 커밋. 중간에 예외가 나면 그 실행은 `failed`, 이미 저장한 품목은 남는다.
+- 참고: `trade_sourcing_agent`는 아직 git 저장소가 아니다.
+
+### 7.2 `supervisor.json` 의 sourcing 항목 (변경됨, 아직 `enabled: false`)
+- `command`: `["{python}", "-m", "sourcing_agent", "from-db"]`
+- `when_sql`: 위 재실행 방지 조건을 추가 (`hub.PENDING_SQL`과 같은 조건 — 둘 중 하나를 바꾸면 같이 바꿀 것).
+- **켜기 전에 결정 필요**: `{python}`(슈퍼바이저를 돌리는 파이썬)에는 2번 의존성(`pyyaml`, `python-dotenv`)이 없어 지금 켜면 실패한다.
+  선택지: (a) 그 파이썬에 2번 의존성 설치, (b) 에이전트별 파이썬을 설정에 둘 수 있게
+  (예: `"python": "venv/Scripts/python.exe"`, `cwd` 기준) `dispatch`를 확장. 에이전트가 늘어날 것을 생각하면 (b) 권장.
+
+### 7.3 스키마 v1 → v3 (컬럼 추가만, 기존 코드 영향 없음)
+| 버전 | 추가 | 의미 |
+|---|---|---|
+| v2 | `products.ref_url` | 참고 페이지 링크 (1번이 조사 중 본 대표 상품 페이지). **사진 아님** |
+| v2 | `products.image_url` | **확정 대표 사진만**: 사람이 업로드(`trade_hub photo`)했거나 공급사 사진 중 고른 것 |
+| v3 | `product_suppliers.image_url` | 공급사가 준 상품 사진 (2·3번이 기록 예정, 아직 채우는 에이전트 없음) |
+
+- 값 형식: http(s) URL 또는 **DB 폴더 기준 상대경로**(`images/16.jpg`). 화면에 쓸 땐 `db.resolve_image(value)`.
+- **검색으로 찾은 '참고 이미지'는 DB에 저장하지 않는다**(대시보드가 그릴 때만 네이버 이미지 검색). 검토관·다른 에이전트도
+  참고 이미지를 우리 상품 사진으로 쓰거나 DB에 넣지 말 것.
+- 마이그레이션: `db.MIGRATIONS = {버전: [(테이블, 컬럼, 타입)]}` → `connect()`가 `user_version`을 보고 없는 컬럼만 `ALTER`.
+  실제 DB는 v3 적용 완료. 정리 전 백업: `data/backups/before_photo_v3_20261117_1018.db`.
+
+### 7.4 `trade_hub/db.py` 새 헬퍼와 CLI
+- 공급처: `upsert_supplier(conn, company, country, **fields)` — (업체명, 국가)로 찾아 갱신/생성, None은 덮어쓰지 않음.
+  `link_supplier(conn, product_id, supplier_id, run_id, **fields)` — **`status`(연락·견적 진행)는 건드리지 않음**.
+- 사진: `set_product_photo(conn, id, 파일)` → `data/images/<id>.<ext>`로 복사 후 연결, `clear_product_photo`, `resolve_image`, `images_dir`.
+- CLI: `trade_hub photo <번호> <파일>` / `trade_hub photo <번호> --clear`,
+  `trade_hub dashboard [--no-open] [--no-ref] [--out 파일]` → `data/dashboard.html` (DB 읽기 전용).
+- 대시보드의 참고 이미지는 `trade_hub/naver.py`가 NAVER API HUB 이미지 검색(`GET /search/v1/image`)으로 가져온다.
+  키는 `trade_hub/.env`의 `NAVER_CLIENT_ID`/`NAVER_CLIENT_SECRET`(HUB 애플리케이션에 '검색' API 구독 필요, 하루 25,000회).
+  키가 없거나 실패하면 '이미지 없음' 아이콘으로 표시하고 오류 없이 진행.
+
+### 7.5 슈퍼바이저 쪽에서 검토하면 좋은 것 (제안)
+1. **검토관 경고 중복**: 2번이 공급처 0곳일 때 이미 priority 1 `decision` 할 일을 만든다. `rule_alerts`의
+   "sourcing인데 공급처 0곳(2일+)"이 같은 품목을 또 경고하므로, 그 할 일이 대기 중이면 경고를 생략하거나 문구를 맞출 것.
+2. **`product_stale_days` 기준**: 2번의 조사 기록(`from_stage = to_stage`)도 `product_events`라서 "마지막 진행"으로 잡힌다.
+   의도와 맞는지 확인(단계 변경만 볼 거라면 `from_stage IS NOT to_stage` 조건).
+3. **tick 끝에 대시보드 갱신**: `trade_hub dashboard --no-open`을 tick 마지막에 돌리면 열 때마다 최신 상태.
+   네이버 호출이 매번 일어나므로 원치 않으면 `--no-ref`.
+4. **스냅샷에 공급처 요약 추가**: 진행 중 품목의 추천 공급처(`is_top_pick`)·신뢰도·위험 건수를 넣으면
+   검토관이 "어느 업체에 먼저 연락할지" 같은 단계 간 판단을 할 수 있다.
+5. `trade_hub/.env`에 네이버 키가 추가됐다(검토관 LLM 키와 같은 파일). 검토관은 이 키를 쓰지 않는다.
+

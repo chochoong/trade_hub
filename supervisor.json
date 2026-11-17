@@ -15,10 +15,10 @@
       "timeout_minutes": 30
     },
     "sourcing": {
-      "enabled": false,
-      "command": ["{python}", "sourcing_agent.py"],
+      "enabled": true,
+      "command": ["C:/workspace/trade_sourcing_agent/venv/Scripts/python.exe", "-m", "sourcing_agent", "from-db"],
       "cwd": "../trade_sourcing_agent",
-      "when_sql": "SELECT COUNT(*) FROM products p WHERE p.stage = 'sourcing' AND NOT EXISTS (SELECT 1 FROM product_suppliers ps WHERE ps.product_id = p.id)",
+      "when_sql": "SELECT COUNT(*) FROM products p WHERE p.stage = 'sourcing' AND NOT EXISTS (SELECT 1 FROM product_suppliers ps WHERE ps.product_id = p.id) AND NOT EXISTS (SELECT 1 FROM product_events e JOIN agent_runs r ON r.id = e.run_id WHERE e.product_id = p.id AND r.agent = 'sourcing')",
       "min_interval_hours": 6,
       "timeout_minutes": 60
     },

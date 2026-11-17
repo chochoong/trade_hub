@@ -9,6 +9,10 @@
   trade_hub done 4                  # 할 일 완료 처리
   trade_hub dismiss 6 7             # 할 일 기각 (안 하기로 함)
   trade_hub briefing                # 최신 슈퍼바이저 브리핑
+  trade_hub dashboard [--no-open] [--no-ref]   # 대시보드 HTML(data/dashboard.html) 만들고 열기 (DB 읽기 전용)
+                                    #   --no-ref: 네이버 참고 이미지 검색 안 함
+  trade_hub photo 16 사진.jpg        # 품목 확정 사진 등록 (data/images/16.jpg로 복사)
+  trade_hub photo 16 --clear        # 확정 사진 삭제
 
 (설치 없이: python -m trade_hub.cli summary)
 """
@@ -94,6 +98,25 @@ def briefing(conn):
     print(f"({b['created_at']})\n{b['summary']}" if b else "브리핑 없음 — python supervisor.py review")
 
 
+def photo(conn, args):
+    if len(args) != 2 or not args[0].isdigit():
+        sys.exit("사용법: trade_hub photo <품목 번호> <사진 파일>   |   trade_hub photo <품목 번호> --clear")
+    pid = int(args[0])
+    row = conn.execute("SELECT name FROM products WHERE id = ?", (pid,)).fetchone()
+    if row is None:
+        sys.exit(f"품목 번호 {pid}가 없습니다")
+    with conn:
+        if args[1] == "--clear":
+            db.clear_product_photo(conn, pid)
+            print(f"  ✓ #{pid} {row['name']}: 확정 사진 삭제")
+            return
+        try:
+            rel = db.set_product_photo(conn, pid, args[1])
+        except ValueError as err:
+            sys.exit(f"  ✗ {err}")
+    print(f"  ✓ #{pid} {row['name']}: 확정 사진 {rel}  (확인: trade_hub dashboard)")
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     for stream in (sys.stdout, sys.stderr):
@@ -116,6 +139,16 @@ def main(argv=None):
         done(conn, rest, status="dismissed")
     elif cmd == "briefing":
         briefing(conn)
+    elif cmd == "photo":
+        photo(conn, rest)
+    elif cmd == "dashboard":
+        from trade_hub import dashboard
+        out = rest[rest.index("--out") + 1] if "--out" in rest and rest.index("--out") + 1 < len(rest) else None
+        path = dashboard.build(out, conn, refs="--no-ref" not in rest, log=print)
+        print(f"  ✓ 대시보드: {path}")
+        if "--no-open" not in rest:
+            import webbrowser
+            webbrowser.open(path.as_uri())
     else:
         sys.exit(__doc__)
 

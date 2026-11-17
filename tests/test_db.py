@@ -114,3 +114,49 @@ def test_backup_once_per_day_and_prunes(conn, tmp_path):
     copy = sqlite3.connect(bdir / "trade_20260103.db")
     assert copy.execute("SELECT name FROM products").fetchone()[0] == "백업될 품목"
     copy.close()
+
+
+# --- 공급처 -----------------------------------------------------------------
+def test_upsert_supplier_matches_company_and_country_and_keeps_values(conn):
+    with conn:
+        a = db.upsert_supplier(conn, "Shenzhen Keys", "China", type="제조사", contact_email="a@x.com")
+        b = db.upsert_supplier(conn, "Shenzhen Keys", "China", type=None, trust="중")
+        c = db.upsert_supplier(conn, "Shenzhen Keys", None)         # 국가 모름 → 다른 업체로 취급
+        d = db.upsert_supplier(conn, "Shenzhen Keys", None)
+    assert a == b and c == d and a != c
+    row = conn.execute("SELECT * FROM suppliers WHERE id = ?", (a,)).fetchone()
+    assert (row["type"], row["contact_email"], row["trust"]) == ("제조사", "a@x.com", "중")
+    with pytest.raises(ValueError):
+        db.upsert_supplier(conn, "X", "China", phone="1")
+
+
+def test_link_supplier_updates_without_touching_status(conn):
+    with conn:
+        pid = db.upsert_product(conn, "키캡", stage="sourcing")
+        sid = db.upsert_supplier(conn, "Keycap Co", "China")
+        lid = db.link_supplier(conn, pid, sid, moq="50 pcs", is_top_pick=1)
+        conn.execute("UPDATE product_suppliers SET status = 'contacted' WHERE id = ?", (lid,))
+        again = db.link_supplier(conn, pid, sid, moq="30 pcs", is_top_pick=0)
+    assert again == lid
+    row = conn.execute("SELECT * FROM product_suppliers WHERE id = ?", (lid,)).fetchone()
+    assert (row["moq"], row["is_top_pick"], row["status"]) == ("30 pcs", 0, "contacted")
+
+
+def test_migrates_v1_db_by_adding_columns(tmp_path):
+    import sqlite3
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)          # v1 시절 products (ref_url·image_url 없음)
+    old.executescript("CREATE TABLE products (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, category TEXT,"
+                      " stage TEXT NOT NULL DEFAULT 'candidate', origin TEXT, search_keyword_en TEXT,"
+                      " keywords_ko_json TEXT, reason TEXT, regulations TEXT, risk TEXT, hs_code TEXT, duty_rate REAL,"
+                      " fta_note TEXT, est_retail_krw INTEGER, est_shipping_usd REAL, notes TEXT,"
+                      " created_at TEXT, updated_at TEXT); INSERT INTO products (name) VALUES ('옛 품목');"
+                      " PRAGMA user_version = 1;")
+    old.close()
+    conn = db.connect(path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+    with conn:
+        pid = db.upsert_product(conn, "옛 품목", image_url="https://x/a.jpg", ref_url="https://x/p")
+    assert conn.execute("SELECT image_url FROM products WHERE id = ?", (pid,)).fetchone()[0] == "https://x/a.jpg"
+    conn.close()
+    db.connect(path).close()             # 두 번 연결해도 오류 없음

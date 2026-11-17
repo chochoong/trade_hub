@@ -25,7 +25,12 @@ from pathlib import Path
 
 PKG_DIR = Path(__file__).resolve().parent
 SCHEMA_PATH = PKG_DIR / "schema.sql"
-SCHEMA_VERSION = 1   # 스키마를 바꾸면 올리고, connect()에 ALTER 마이그레이션을 추가할 것 (컬럼 추가만 허용)
+SCHEMA_VERSION = 3   # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
+# 버전별로 추가된 컬럼: 예전 DB에는 connect() 때 ALTER TABLE로 붙인다 (새 DB는 schema.sql에 이미 있음)
+MIGRATIONS = {
+    2: [("products", "ref_url", "TEXT"), ("products", "image_url", "TEXT")],
+    3: [("product_suppliers", "image_url", "TEXT")],
+}
 
 STAGES = ["candidate", "sourcing", "negotiating", "sampling", "ordered", "shipping", "selling", "closed"]
 TERMINAL_STAGES = {"closed", "dropped"}
@@ -49,8 +54,17 @@ def connect(path=None):
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")     # 여러 에이전트·슈퍼바이저가 동시에 읽고 써도 덜 막히게
     conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
-    if conn.execute("PRAGMA user_version").fetchone()[0] == 0:
-        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version < SCHEMA_VERSION:
+        with conn:
+            for v in sorted(MIGRATIONS):
+                if v <= version:
+                    continue
+                for table, col, typ in MIGRATIONS[v]:
+                    cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+                    if col not in cols:
+                        conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     return conn
 
 
@@ -97,7 +111,8 @@ def agent_run(conn, agent, provider=None, model=None, args=None):
 # 품목·단계
 # ---------------------------------------------------------------------------
 PRODUCT_FIELDS = {"category", "origin", "search_keyword_en", "keywords_ko_json", "reason", "regulations", "risk",
-                  "hs_code", "duty_rate", "fta_note", "est_retail_krw", "est_shipping_usd", "notes"}
+                  "hs_code", "duty_rate", "fta_note", "est_retail_krw", "est_shipping_usd", "notes",
+                  "ref_url", "image_url"}
 
 
 def upsert_product(conn, name, run_id=None, stage="candidate", **fields):
@@ -163,6 +178,100 @@ def add_task(conn, kind, title, product_id=None, run_id=None, ref_table=None, re
         "INSERT INTO tasks (product_id, run_id, kind, ref_table, ref_id, title, detail, priority, due_date)"
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (product_id, run_id, kind, ref_table, ref_id, title, detail, priority, due_date)).lastrowid
+
+
+# ---------------------------------------------------------------------------
+# 공급처 (2번 sourcing 에이전트가 쓴다)
+# ---------------------------------------------------------------------------
+SUPPLIER_FIELDS = {"type", "years_in_business", "certifications", "platform_badge", "url", "contact_name",
+                   "contact_email", "contact_other", "trust", "trust_reason", "red_flags", "notes"}
+LINK_FIELDS = {"is_top_pick", "moq", "unit_price_usd", "price_note", "est_landed_krw", "est_margin_pct", "image_url"}
+
+
+def _check_fields(fields, allowed, what):
+    unknown = set(fields) - allowed
+    if unknown:
+        raise ValueError(f"알 수 없는 {what} 필드: {unknown}")
+    return {k: v for k, v in fields.items() if v is not None}
+
+
+def upsert_supplier(conn, company, country=None, **fields):
+    """(업체명, 국가)로 공급처를 찾아 갱신하거나 새로 만든다. None인 값은 기존 값을 덮어쓰지 않는다. id를 돌려준다."""
+    fields = _check_fields(fields, SUPPLIER_FIELDS, "공급처")
+    row = conn.execute("SELECT id FROM suppliers WHERE company = ? AND country IS ?", (company, country)).fetchone()
+    if row is None:
+        cols = ["company", "country", *fields]
+        return conn.execute(f"INSERT INTO suppliers ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                            (company, country, *fields.values())).lastrowid
+    if fields:
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        conn.execute(f"UPDATE suppliers SET {sets}, updated_at = ? WHERE id = ?", (*fields.values(), now(), row["id"]))
+    return row["id"]
+
+
+def link_supplier(conn, product_id, supplier_id, run_id=None, **fields):
+    """품목-공급처 연결을 만들거나 갱신한다. status(연락·견적 진행 상태)는 다른 단계가 바꾼 값을 유지. id를 돌려준다."""
+    fields = _check_fields(fields, LINK_FIELDS, "품목-공급처")
+    row = conn.execute("SELECT id FROM product_suppliers WHERE product_id = ? AND supplier_id = ?",
+                       (product_id, supplier_id)).fetchone()
+    if row is None:
+        cols = ["product_id", "supplier_id", "run_id", *fields]
+        return conn.execute(f"INSERT INTO product_suppliers ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                            (product_id, supplier_id, run_id, *fields.values())).lastrowid
+    sets = ", ".join(f"{k} = ?" for k in ["run_id", *fields])
+    conn.execute(f"UPDATE product_suppliers SET {sets}, updated_at = ? WHERE id = ?",
+                 (run_id, *fields.values(), now(), row["id"]))
+    return row["id"]
+
+
+# ---------------------------------------------------------------------------
+# 사진 — products.image_url = 확정 대표 사진 (직접 업로드 또는 공급사 사진 중 선택)
+#        product_suppliers.image_url = 공급사가 준 사진
+#        검색으로 찾은 참고 이미지는 DB에 저장하지 않는다 (대시보드가 화면에만 표시)
+# ---------------------------------------------------------------------------
+PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+
+
+def images_dir():
+    return default_path().parent / "images"
+
+
+def resolve_image(value):
+    """image_url 값 → 브라우저에서 열 수 있는 주소 (http(s)는 그대로, 상대경로는 DB 폴더 기준 file:// URI). 없으면 None."""
+    if not value:
+        return None
+    if str(value).startswith(("http://", "https://")):
+        return str(value)
+    path = Path(value)
+    path = path if path.is_absolute() else default_path().parent / path
+    return path.resolve().as_uri() if path.exists() else None
+
+
+def set_product_photo(conn, product_id, src):
+    """사진 파일을 data/images/<품목번호><확장자>로 복사하고 products.image_url에 연결한다. 저장한 상대경로를 돌려준다."""
+    import shutil
+    src = Path(src)
+    if not src.is_file():
+        raise ValueError(f"사진 파일이 없습니다: {src}")
+    ext = src.suffix.lower()
+    if ext not in PHOTO_EXTS:
+        raise ValueError(f"사진 형식이 아닙니다 ({ext}). 가능: {', '.join(sorted(PHOTO_EXTS))}")
+    if conn.execute("SELECT 1 FROM products WHERE id = ?", (product_id,)).fetchone() is None:
+        raise ValueError(f"품목 번호 {product_id}가 없습니다")
+    images_dir().mkdir(parents=True, exist_ok=True)
+    for old in images_dir().glob(f"{product_id}.*"):     # 확장자가 바뀌어도 사진은 1장만
+        old.unlink()
+    shutil.copyfile(src, images_dir() / f"{product_id}{ext}")
+    rel = f"images/{product_id}{ext}"
+    conn.execute("UPDATE products SET image_url = ?, updated_at = ? WHERE id = ?", (rel, now(), product_id))
+    return rel
+
+
+def clear_product_photo(conn, product_id):
+    """확정 사진 연결을 끊고, 업로드했던 파일이면 지운다."""
+    for old in images_dir().glob(f"{product_id}.*"):
+        old.unlink()
+    conn.execute("UPDATE products SET image_url = NULL, updated_at = ? WHERE id = ?", (now(), product_id))
 
 
 def backup(conn, backup_dir=None, keep=14, today=None):

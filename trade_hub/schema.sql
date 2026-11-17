@@ -67,6 +67,10 @@ CREATE TABLE IF NOT EXISTS products (
     fta_note           TEXT,
     est_retail_krw     INTEGER,               -- 국내 판매가 추정
     est_shipping_usd   REAL,                  -- 개당 국제운송비 추정
+    ref_url            TEXT,                  -- 참고 페이지 (1번이 조사 중 본 상품·기사 링크. 사진 아님)  [v2]
+    image_url          TEXT,                  -- 확정 대표 사진: 직접 업로드했거나 공급사 사진 중 고른 것만  [v2]
+                                              --   http(s) URL 또는 DB 폴더 기준 상대경로(images/16.jpg)
+                                              --   검색으로 찾은 '참고 이미지'는 저장하지 않는다 (화면에만 표시)
     notes              TEXT,                  -- 사람이 적는 메모
     created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime')),
     updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime'))
@@ -139,6 +143,7 @@ CREATE TABLE IF NOT EXISTS product_suppliers (
     price_note       TEXT,
     est_landed_krw   INTEGER,                 -- 스크립트가 계산한 개당 원가
     est_margin_pct   REAL,
+    image_url        TEXT,                    -- 이 공급사가 제공한 상품 사진 (URL 또는 상대경로)  [v3]
     reject_reason    TEXT,
     updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime')),
     UNIQUE (product_id, supplier_id)
