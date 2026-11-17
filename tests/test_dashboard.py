@@ -110,3 +110,17 @@ def test_supplier_contacts_links_and_v4_score(conn, tmp_path):
     assert "javascript:alert" not in html                      # http(s)가 아닌 링크는 버림
     assert "Alibaba 평점 4.8/5" in html and "WhatsApp +86 123" in html and "a@safe.example.com" in html
     assert "54점 (C)" in html and "예전 저장 문장" in html and "58.0점" not in html
+
+
+def test_supplier_moq_badges(conn, tmp_path):
+    with conn:
+        pid = db.upsert_product(conn, "키캡", stage="sourcing")
+        for company, kw in [("Small Co", {"moq": "1 piece"}),
+                            ("Big Co", {"moq": "25 pcs (A형), 500 pcs", "purchase_mode": "retail"}),
+                            ("Quiet Co", {}),
+                            ("Oem Co", {"moq": "3000 pcs", "purchase_mode": "oem"})]:
+            db.link_supplier(conn, pid, db.upsert_supplier(conn, company, "China"), **kw)
+    html = dashboard.build(tmp_path / "m.html", conn, refs=False).read_text(encoding="utf-8")
+    assert '<span class="moq ok" title="기준: 50개 이하 · 기본값 · MOQ 1개">소량 OK</span>' in html
+    assert '<span class="moq over" title="기준: 10개 이하 (retail) · 기본값 · MOQ 25개">MOQ 초과</span>' in html
+    assert ">MOQ 미확인</span>" in html and ">OEM · 제한 없음</span>" in html

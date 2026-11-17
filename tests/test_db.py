@@ -201,3 +201,36 @@ def test_migration_adds_v4_columns_to_old_db(tmp_path, monkeypatch):
     assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
     assert conn.execute("SELECT moq, score FROM product_suppliers").fetchone()[:] == ("50 pcs", None)   # 기존 행 보존
     conn.close()
+
+
+# --- MOQ 기준 (v5) -------------------------------------------------------------
+@pytest.mark.parametrize("text, qty", [
+    ("1 piece", 1), ("50 pcs", 50), ("25 pcs (LED 없는 2/3/4구 스트립형), 50 pcs (LED형)", 25),
+    ("1,000 pcs", 1000), ("MOQ: 20 pieces", 20), ("", None), (None, None), ("문의 필요", None)])
+def test_first_qty(text, qty):
+    assert db.first_qty(text) == qty
+
+
+@pytest.mark.parametrize("moq, mode, max_qty, expected", [
+    ("50 pcs", None, None, ("ok", 50, 50)),              # 칸이 비어 있으면 50 기준
+    ("51 pcs", None, None, ("over", 51, 50)),
+    ("20 pcs", "retail", None, ("over", 20, 10)),        # retail 기본 10
+    ("10 pcs", "retail", None, ("ok", 10, 10)),
+    ("50 pcs", "small_batch", None, ("ok", 50, 50)),
+    ("5000 pcs", "oem", None, ("no_limit", 5000, None)),  # oem 제한 없음
+    ("30 pcs", "oem", 20, ("over", 30, 20)),             # max_order_qty가 있으면 그것이 우선
+    ("100 pcs", "small_batch", 200, ("ok", 100, 200)),
+    (None, "small_batch", None, ("unknown", None, 50)),
+    ("1 set", "알수없음", None, ("ok", 1, 50)),
+])
+def test_moq_fit(moq, mode, max_qty, expected):
+    assert db.moq_fit(moq, mode, max_qty) == expected
+
+
+def test_link_supplier_stores_max_order_qty(conn):
+    with conn:
+        pid = db.upsert_product(conn, "키캡", stage="sourcing")
+        sid = db.upsert_supplier(conn, "Keycap Co", "China")
+        lid = db.link_supplier(conn, pid, sid, purchase_mode="small_batch", max_order_qty=50)
+    assert conn.execute("SELECT purchase_mode, max_order_qty FROM product_suppliers WHERE id = ?",
+                        (lid,)).fetchone()[:] == ("small_batch", 50)

@@ -149,6 +149,8 @@ CREATE TABLE IF NOT EXISTS product_suppliers (
     grade                 TEXT CHECK (grade IS NULL OR grade IN ('A', 'B', 'C', 'D')),
     score_detail_json     TEXT CHECK (score_detail_json IS NULL OR json_valid(score_detail_json)),   -- {"moq_fit":10, ..., "risk_penalty":-4}
     purchase_mode         TEXT,               -- 조사 때 구매 방식: retail / small_batch / oem
+    max_order_qty         INTEGER,            -- 첫 구매 최대 수량 (MOQ 판단 기준) [v5]
+                                              --   비어 있으면 구매 방식 기본값: retail 10 · small_batch 50 · oem 제한 없음 · 모름 50
     trade_terms_json      TEXT CHECK (trade_terms_json IS NULL OR json_valid(trade_terms_json)),     -- 웹에서 본 조건 {"lead_time","payment_terms","sample","export_markets"}
                                               --   업체가 답장으로 확정한 조건은 여기가 아니라 quotes에
     first_questions_json  TEXT CHECK (first_questions_json IS NULL OR json_valid(first_questions_json)),  -- 첫 문의 때 물어볼 질문 ["...", ...]

@@ -144,6 +144,21 @@ def web_link(url, label):
     return f'<a href="{e(url)}" target="_blank" rel="noopener noreferrer">{e(label)}</a>'
 
 
+MOQ_BADGE = {"ok": ("소량 OK", "ok"), "over": ("MOQ 초과", "over"), "unknown": ("MOQ 미확인", "unk"),
+             "no_limit": ("OEM · 제한 없음", "unk")}
+
+
+def moq_badge(s):
+    """MOQ 원문의 첫 숫자를 첫 구매 최대 수량(max_order_qty, 없으면 구매 방식 기본값·50)과 비교한 배지."""
+    fit, qty, limit = db.moq_fit(s["moq"], s["ps_mode"], s["ps_max_qty"])
+    label, cls = MOQ_BADGE[fit]
+    basis = ("기준: 제한 없음 (OEM)" if limit is None
+             else f"기준: {limit}개 이하" + (f" ({s['ps_mode']})" if s["ps_mode"] else "")
+             + ("" if s["ps_max_qty"] is not None else " · 기본값"))
+    title = basis + (f" · MOQ {qty}개" if qty is not None else "")
+    return f'<span class="moq {cls}" title="{e(title)}">{label}</span>'
+
+
 def supplier_score(s):
     """v4 score·grade 칸이 있으면 그것, 없으면 예전 저장분의 trust_reason "<점수>점 (<등급>) — 요약" 앞부분."""
     if s["ps_score"] is not None:
@@ -260,7 +275,7 @@ def products_in_progress(conn):
     for p in prods:
         sups = conn.execute("""
             SELECT s.*, ps.id AS link_id, ps.image_url AS sup_image, ps.status, ps.is_top_pick, ps.moq, ps.price_note, ps.unit_price_usd, ps.run_id,
-                   ps.score AS ps_score, ps.grade AS ps_grade
+                   ps.score AS ps_score, ps.grade AS ps_grade, ps.purchase_mode AS ps_mode, ps.max_order_qty AS ps_max_qty
             FROM product_suppliers ps JOIN suppliers s ON s.id = ps.supplier_id
             WHERE ps.product_id = ? ORDER BY ps.is_top_pick DESC, ps.id""", (p["id"],)).fetchall()
         report = conn.execute("""SELECT detail, run_id FROM tasks WHERE product_id = ? AND run_id IN
@@ -294,7 +309,7 @@ def products_in_progress(conn):
                 f'{" · " + site if site else ""}</div>{badge}</div></div>',
                 f'<span class="trust t{e(s["trust"])}">{e(s["trust"] or "–")}</span> <span class="small">{e(supplier_score(s))}</span>'
                 + (f'<div class="small">{clip(reason, 40)}</div>' if reason else ""),
-                e(s["status"]), clip(s["moq"], 30), clip(s["price_note"] or num(s["unit_price_usd"], "${:g}"), 30),
+                e(s["status"]), f'{moq_badge(s)}<div>{clip(s["moq"], 30)}</div>', clip(s["price_note"] or num(s["unit_price_usd"], "${:g}"), 30),
                 contact or '<span class="muted">–</span>',
                 clip(s["red_flags"], 50),
             ])
@@ -411,6 +426,8 @@ table.tight td{padding:6px 8px}
 .p1{background:var(--bad)}.p2{background:var(--warn)}.p3{background:var(--muted)}
 .pick{color:var(--pick);font-weight:600;font-size:12px;white-space:nowrap}
 .trust{font-weight:700}.t상{color:var(--ok)}.t중{color:var(--warn)}.t하{color:var(--bad)}
+.moq{display:inline-block;font-size:11px;font-weight:600;padding:1px 7px;border-radius:999px;border:1px solid;white-space:nowrap}
+.moq.ok{color:var(--ok)}.moq.over{color:var(--bad)}.moq.unk{color:var(--muted)}
 .card{border:1px solid var(--line);border-radius:10px;padding:12px;margin:10px 0}
 .card-head{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-bottom:8px}.right{margin-left:auto}
 .pcell{display:flex;gap:10px;align-items:flex-start;min-width:260px}

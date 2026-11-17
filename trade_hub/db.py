@@ -18,6 +18,7 @@ DB 파일 위치: 환경변수 TRADE_DB, 없으면 trade_hub/data/trade.db
 
 import json
 import os
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
@@ -25,7 +26,7 @@ from pathlib import Path
 
 PKG_DIR = Path(__file__).resolve().parent
 SCHEMA_PATH = PKG_DIR / "schema.sql"
-SCHEMA_VERSION = 4   # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
+SCHEMA_VERSION = 5   # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
 # 버전별로 추가된 컬럼: 예전 DB에는 connect() 때 ALTER TABLE로 붙인다 (새 DB는 schema.sql에 이미 있음)
 
 
@@ -44,6 +45,7 @@ MIGRATIONS = {
         ("product_suppliers", "first_questions_json", _json_col("first_questions_json")),
         ("product_suppliers", "unverified_json", _json_col("unverified_json")),
         ("product_suppliers", "evidence_json", _json_col("evidence_json"))],
+    5: [("product_suppliers", "max_order_qty", "INTEGER")],
 }
 
 STAGES = ["candidate", "sourcing", "negotiating", "sampling", "ordered", "shipping", "selling", "closed"]
@@ -202,7 +204,35 @@ SUPPLIER_FIELDS = {"type", "years_in_business", "certifications", "platform_badg
 LINK_FIELDS = {"is_top_pick", "moq", "unit_price_usd", "price_note", "est_landed_krw", "est_margin_pct", "image_url",
                # v4: 2번이 이 품목 기준으로 평가한 결과. *_json 필드는 list/dict를 그대로 넘기면 JSON으로 저장
                "score", "grade", "score_detail_json", "purchase_mode", "trade_terms_json", "first_questions_json",
-               "unverified_json", "evidence_json"}
+               "unverified_json", "evidence_json", "max_order_qty"}
+
+# MOQ 판단 기준: max_order_qty가 비어 있으면 구매 방식 기본값 (oem = 제한 없음), 구매 방식도 모르면 50
+DEFAULT_MAX_ORDER_QTY = {"retail": 10, "small_batch": 50, "oem": None}
+FALLBACK_MAX_ORDER_QTY = 50
+
+
+def first_qty(text):
+    """MOQ 원문에서 첫 숫자 (예: "1 piece" → 1, "25 pcs (…), 50 pcs" → 25, "1,000 pcs" → 1000). 없으면 None."""
+    m = re.search(r"\d[\d,]*", text or "")
+    return int(m[0].replace(",", "")) if m else None
+
+
+def order_limit(purchase_mode=None, max_order_qty=None):
+    """첫 구매 최대 수량. None이면 제한 없음 (oem)."""
+    if max_order_qty is not None:
+        return int(max_order_qty)
+    mode = (purchase_mode or "").strip().lower()
+    return DEFAULT_MAX_ORDER_QTY[mode] if mode in DEFAULT_MAX_ORDER_QTY else FALLBACK_MAX_ORDER_QTY
+
+
+def moq_fit(moq, purchase_mode=None, max_order_qty=None):
+    """(판정, MOQ 첫 숫자, 기준 수량). 판정: ok(기준 이하) / over(기준 초과) / unknown(MOQ 없음) / no_limit(oem)."""
+    qty, limit = first_qty(moq), order_limit(purchase_mode, max_order_qty)
+    if qty is None:
+        return "unknown", None, limit
+    if limit is None:
+        return "no_limit", qty, None
+    return ("ok" if qty <= limit else "over"), qty, limit
 
 
 def _check_fields(fields, allowed, what):
