@@ -142,3 +142,14 @@ def test_search_form_only_in_server_mode(ba):
         dashboard.SERVER["on"] = False
     assert 'form class="buysearch"' in html and '<option value="watch" selected>시계</option>' in html
     assert 'value="food"' not in html
+    assert 'name="query" required maxlength="100" autocomplete="off" placeholder' in html   # 새로 고침하면 빈 칸 (value 없음)
+
+
+def test_search_shows_korean_original(ba, conn):
+    from trade_hub import translate
+    translate.to_japanese("세이코 시계", call=lambda q: "セイコー 腕時計")
+    (ba / "reports").mkdir()
+    (ba / "reports" / "search.json").write_text(json.dumps({"ok": True, "run_at": "2026-11-18T12:00:00",
+        "query": {"keyword": "セイコー 腕時計", "category": "watch"}, "markets": [], "found": 0, "items": []},
+        ensure_ascii=False), encoding="utf-8")
+    assert "(← 세이코 시계)" in buying.page()

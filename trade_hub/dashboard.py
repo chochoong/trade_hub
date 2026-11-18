@@ -1001,7 +1001,7 @@ function api(path, body) {
       return r.json().then(function (d) { if (!r.ok) throw new Error(d.error || r.status); return d; }); });
 }
 function startJob(path, body) {
-  api(path, body).then(function (job) { mine[job.id] = true; poll(); })
+  return api(path, body).then(function (job) { mine[job.id] = true; poll(); })
     .catch(function (err) { alert(err.message); });
 }
 document.addEventListener("click", function (ev) {
@@ -1023,7 +1023,9 @@ document.addEventListener("submit", function (ev) {   // 구매대행 직접 검
   var body = {};
   new FormData(f).forEach(function (v, k) { body[k] = v; });
   if (!body.query.trim()) return;
-  startJob("/api/buysearch", body);
+  var btn = f.querySelector("button"), txt = btn.textContent;
+  btn.disabled = true; btn.textContent = "검색 준비 중…";          // 한글이면 서버가 일본어로 번역하는 동안 (1~3초)
+  startJob("/api/buysearch", body).then(function () { btn.disabled = false; btn.textContent = txt; });
 });
 document.addEventListener("submit", function (ev) {   // 3번 협상 폼 → /api/neg (메일은 보내지 않음, 초안만)
   var f = ev.target.closest("form.negf");

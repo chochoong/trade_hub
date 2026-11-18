@@ -32,7 +32,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from trade_hub import buying, dashboard, db
+from trade_hub import buying, dashboard, db, translate
 
 ROOT = Path(__file__).resolve().parent.parent          # trade_hub 저장소 폴더
 CONFIG = ROOT / "supervisor.json"
@@ -258,7 +258,14 @@ def buy_search(conn, body):
     with LOCK:
         if any(j["kind"] == "buysearch" and j["status"] == "running" for j in JOBS.values()):
             return 409, {"error": "직접 검색이 이미 실행 중입니다. 끝난 뒤 다시 눌러 주세요."}
-    return 200, job_view(start_job("buysearch", (q, cat), f"구매대행 검색: {q} ({cats[cat]})", anchor="buy"))
+    shown = q
+    if translate.has_korean(q):              # 라쿠텐은 일본어로만 찾힌다 → 한글이면 일본어 검색어로 바꿔서 실행
+        try:
+            ja = translate.to_japanese(q)
+        except RuntimeError as err:
+            return 502, {"error": str(err)}
+        shown, q = f"{q} → {ja}", ja
+    return 200, job_view(start_job("buysearch", (q, cat), f"구매대행 검색: {shown} ({cats[cat]})", anchor="buy"))
 
 
 # ---------------------------------------------------------------------------

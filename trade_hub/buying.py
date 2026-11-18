@@ -167,11 +167,12 @@ def _search_section(data):
         opts = "".join(f'<option value="{e(k)}"{" selected" if k == (last.get("category") or "watch") else ""}>{e(n)}</option>'
                        for k, n in categories(data["dir"]))
         how = (f'<form class="buysearch" style="display:flex;gap:6px;flex-wrap:wrap;margin:6px 0">'
-               f'<input name="query" required maxlength="100" placeholder="일본 쇼핑몰 검색어 (예: セイコー SBTQ041)" '
-               f'value="{e(last.get("keyword") or "")}" style="flex:1;min-width:220px">'
+               '<input name="query" required maxlength="100" autocomplete="off" '
+               'placeholder="검색어 — 한글로 쓰면 일본어로 바꿔서 찾습니다 (예: 세이코 SBTQ041)" style="flex:1;min-width:220px">'
                f'<select name="category" title="관세율·마진 기준·차단 규칙이 카테고리마다 다릅니다">{opts}</select>'
                f'<button type="submit">🔎 검색</button></form>'
-               '<p class="small muted">라쿠텐에서 검색해 개당 원가가 낮은 순으로 보여 줍니다 (30초~1분 · 무료). '
+               '<p class="small muted">라쿠텐에서 검색해 개당 원가가 낮은 순으로 보여 줍니다 (30초~1분). '
+               '한글이 들어 있으면 AI가 일본어 검색어로 바꿔서 찾습니다 (1원 미만 · 같은 검색어는 다시 번역하지 않음). '
                '모델명(예: SBTQ041)을 넣으면 그 단어가 들어간 상품만 남겨 부속품을 걸러 냅니다. '
                '감시 목록·가격 이력·알림에는 영향 없습니다.</p>')
     else:
@@ -202,7 +203,10 @@ def _search_section(data):
                      f'{num(o.get("price"), "{:,.0f}" if o.get("currency") in ("JPY", "KRW") else "{:,.2f}")} '
                      f'{e(o.get("currency"))} {ship}',
                      num(it.get("cost_krw"), "{:,}원"), *cells, clip(" / ".join(it.get("warnings") or []), 60)])
-    sub = (f'"{e(q.get("keyword") or "")}" · 카테고리 {e(q.get("category") or "")} · '
+    from trade_hub import translate
+    ko = translate.original_of(q.get("keyword"))         # 한글로 검색했으면 원래 검색어도 보여 줌
+    sub = (f'"{e(q.get("keyword") or "")}"' + (f' (← {e(ko)})' if ko else "") + ' · 카테고리'
+           f' {e(q.get("category") or "")} · '
            f'{e((s.get("run_at") or "")[:16].replace("T", " "))} 검색 · 쇼핑몰 결과 {e(s.get("found", 0))}건')
     if not s.get("ok"):
         sub += f' · <span class="bad">실패: {e(s.get("error") or "")}</span>'

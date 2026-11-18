@@ -160,3 +160,21 @@ def test_buy_search_command(monkeypatch, tmp_path):
     monkeypatch.setenv("BUYAGENT_DIR", str(tmp_path))
     cmd, cwd, _ = ORIGINAL_JOB_COMMAND("buysearch", ("--evil x", "watch"))
     assert cmd[1:] == ["main.py", "--search=--evil x", "--category=watch"] and cwd == tmp_path   # 옵션으로 오인 안 됨
+
+
+def test_buy_search_translates_korean(srv, monkeypatch, tmp_path):
+    from trade_hub import translate
+    base = tmp_path / "ba"
+    (base / "config").mkdir(parents=True)
+    (base / "config" / "categories.toml").write_text('[categories.watch]\nname = "시계"\nallowed = true\n', encoding="utf-8")
+    monkeypatch.setenv("BUYAGENT_DIR", str(base))
+    monkeypatch.setattr(translate, "to_japanese", lambda q: "セイコー 腕時計")
+    code, job = call(srv + "/api/buysearch", {"query": "세이코 시계", "category": "watch"})
+    assert code == 200 and "세이코 시계 → セイコー 腕時計" in job["label"]
+
+    def fail(q):
+        raise RuntimeError("번역 실패 (X): 일본어로 직접 입력해 주세요")
+    monkeypatch.setattr(translate, "to_japanese", fail)
+    wait_job(srv, job["id"])
+    code, out = call(srv + "/api/buysearch", {"query": "세이코 시계", "category": "watch"})
+    assert code == 502 and "일본어로 직접" in out["error"]
