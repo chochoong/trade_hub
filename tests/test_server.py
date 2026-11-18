@@ -153,6 +153,7 @@ def test_job_command_builds_type_flag(monkeypatch, tmp_path):
 def test_buy_search_runs_buyagent(srv, monkeypatch, tmp_path):
     base = tmp_path / "ba"
     (base / "config").mkdir(parents=True)
+    (base / "main.py").write_text("", encoding="utf-8")
     (base / "config" / "categories.toml").write_text(
         '[categories.watch]\nname = "시계"\nallowed = true\n[categories.food]\nname = "식품"\nallowed = false\n',
         encoding="utf-8")
@@ -179,6 +180,7 @@ def test_buy_search_passes_korean_and_api_key(srv, monkeypatch, tmp_path):
     from trade_hub import server
     base = tmp_path / "ba"
     (base / "config").mkdir(parents=True)
+    (base / "main.py").write_text("", encoding="utf-8")
     (base / "config" / "categories.toml").write_text('[categories.watch]\nname = "시계"\nallowed = true\n', encoding="utf-8")
     monkeypatch.setenv("BUYAGENT_DIR", str(base))
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -208,6 +210,7 @@ def test_buy_search_language_picks_market(srv, monkeypatch, tmp_path):
     from trade_hub import server
     base = tmp_path / "ba"
     (base / "config").mkdir(parents=True)
+    (base / "main.py").write_text("", encoding="utf-8")
     (base / "config" / "categories.toml").write_text('[categories.watch]\nname = "시계"\nallowed = true\n', encoding="utf-8")
     monkeypatch.setenv("BUYAGENT_DIR", str(base))
     seen = []
@@ -229,3 +232,13 @@ def test_translate_api(srv, monkeypatch):
     monkeypatch.setattr(translate, "_call_llm", lambda q, lang: (_ for _ in ()).throw(ConnectionError()))
     code, out = call(srv + "/api/translate", {"text": "세이코 가방", "lang": "en"})
     assert code == 502 and "영어로 직접" in out["error"]
+
+
+def test_buy_search_without_buyagent_folder(srv, monkeypatch, tmp_path):
+    monkeypatch.setenv("BUYAGENT_DIR", str(tmp_path / "없음"))
+    code, out = call(srv + "/api/buysearch", {"query": "x", "category": "watch"})
+    assert code == 400 and "buyagent 폴더가 없습니다" in out["error"]
+    (tmp_path / "없음").mkdir()
+    (tmp_path / "없음" / "main.py").write_text("", encoding="utf-8")
+    code, out = call(srv + "/api/buysearch", {"query": "x", "category": "watch"})
+    assert code == 400 and "카테고리 설정" in out["error"]

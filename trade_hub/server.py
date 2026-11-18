@@ -286,7 +286,12 @@ def buy_search(conn, body):
         return 400, {"error": "검색어를 입력해 주세요. (일본 쇼핑몰 검색어, 예: セイコー SBTQ041)"}
     if len(q) > MAX_QUERY:
         return 400, {"error": f"검색어는 {MAX_QUERY}자 이내로 입력해 주세요."}
+    base = Path(buying.buyagent_dir())
+    if not (base / "main.py").is_file():
+        return 400, {"error": f"buyagent 폴더가 없습니다: {base} (환경변수 BUYAGENT_DIR 또는 ../buyagent/buyagent 확인)"}
     cats = dict(buying.categories())
+    if not cats:
+        return 400, {"error": f"buyagent 카테고리 설정을 읽지 못했습니다: {base / 'config' / 'categories.toml'}"}
     if cat not in cats:
         return 400, {"error": "카테고리를 골라 주세요."}
     market = LANG_MARKET.get(str(body.get("lang") or "ja"))
