@@ -11,6 +11,7 @@ dependencies = []          # 공용 DB 헬퍼는 표준 라이브러리만 사�
 
 [project.optional-dependencies]
 supervisor = ["anthropic>=2.8,<3"]
+calendar = ["google-api-python-client>=2", "google-auth-oauthlib>=1"]
 dev = ["pytest>=8"]
 
 [project.scripts]

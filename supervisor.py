@@ -523,6 +523,21 @@ def refresh_dashboard(conn, cfg, log=print):
     return path
 
 
+def sync_calendar(conn, cfg, log=print):
+    """tick 끝에 DB 날짜를 구글 '무역' 캘린더에 반영. 로그인 전이면 조용히 건너뜀, 실패해도 tick은 실패로 치지 않음.
+    설정: "calendar": {"enabled": true}"""
+    if not cfg.get("calendar", {}).get("enabled", True):
+        return None
+    from trade_hub import calendar_sync
+    if not calendar_sync.configured():
+        return None
+    try:
+        return calendar_sync.sync(conn, log=lambda m: None) | {"ok": True}
+    except Exception as e:   # 네트워크·토큰 만료 등 — 브리핑의 실패 경고 대상이 아님 (로그만)
+        log(f"  ✗ 캘린더 동기화 실패: {type(e).__name__}: {e}")
+        return None
+
+
 def review_due(conn, cfg, now):
     if not cfg["review"].get("enabled", True):
         return False
@@ -610,6 +625,9 @@ def main():
             if args.cmd == "tick":
                 print("▶ 대시보드")
                 refresh_dashboard(conn, cfg)   # 에이전트 결과·브리핑까지 반영된 뒤에
+                cal = sync_calendar(conn, cfg)
+                if cal:
+                    print(f"  · 캘린더: 추가 {cal['add']} · 수정 {cal['update']} · 삭제 {cal['delete']}")
 
 
 if __name__ == "__main__":

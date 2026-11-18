@@ -14,6 +14,8 @@
   trade_hub serve [--port 8765] [--no-open] [--no-ref]   # 대시보드 서버: 검색·새 조사·[공급처 찾기] (이 PC에서만)
   trade_hub photo 16 사진.jpg        # 품목 확정 사진 등록 (data/images/16.jpg로 복사)
   trade_hub photo 16 --clear        # 확정 사진 삭제
+  trade_hub calendar-login          # 구글 캘린더 로그인 (한 번 · 권한: 이 앱이 만든 캘린더만)
+  trade_hub calendar-sync [--dry-run]   # DB 날짜(메일·후속 예정·할 일 기한·견적 만료·선적) → '무역' 캘린더
 
 (설치 없이: python -m trade_hub.cli summary)
 """
@@ -154,6 +156,15 @@ def main(argv=None):
         if "--no-open" not in rest:
             import webbrowser
             webbrowser.open(path.as_uri())
+    elif cmd == "calendar-login":
+        from trade_hub import calendar_sync
+        print(f"  ✓ 구글 캘린더 로그인 완료 (토큰: {calendar_sync.login()})")
+    elif cmd == "calendar-sync":
+        from trade_hub import calendar_sync
+        try:
+            calendar_sync.sync(conn, dry_run="--dry-run" in rest)
+        except RuntimeError as e:
+            sys.exit(f"  ✗ {e}")
     else:
         sys.exit(__doc__)
 
