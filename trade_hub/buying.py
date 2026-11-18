@@ -204,7 +204,7 @@ def _search_section(data):
                      f'{e(o.get("currency"))} {ship}',
                      num(it.get("cost_krw"), "{:,}원"), *cells, clip(" / ".join(it.get("warnings") or []), 60)])
     from trade_hub import translate
-    ko = translate.original_of(q.get("keyword"))         # 한글로 검색했으면 원래 검색어도 보여 줌
+    ko = q.get("keyword_original") or translate.original_of(q.get("keyword"))   # 한글로 검색했으면 원래 검색어도 보여 줌
     sub = (f'"{e(q.get("keyword") or "")}"' + (f' (← {e(ko)})' if ko else "") + ' · 카테고리'
            f' {e(q.get("category") or "")} · '
            f'{e((s.get("run_at") or "")[:16].replace("T", " "))} 검색 · 쇼핑몰 결과 {e(s.get("found", 0))}건')

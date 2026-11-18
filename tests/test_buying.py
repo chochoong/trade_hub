@@ -153,3 +153,11 @@ def test_search_shows_korean_original(ba, conn):
         "query": {"keyword": "セイコー 腕時計", "category": "watch"}, "markets": [], "found": 0, "items": []},
         ensure_ascii=False), encoding="utf-8")
     assert "(← 세이코 시계)" in buying.page()
+
+
+def test_search_shows_keyword_original_from_buyagent(ba, conn):
+    (ba / "reports").mkdir()
+    (ba / "reports" / "search.json").write_text(json.dumps({"ok": True, "run_at": "2026-11-18T12:00:00",
+        "query": {"keyword": "セイコー 腕時計", "keyword_original": "세이코 손목시계", "category": "watch"},
+        "markets": [], "found": 0, "items": []}, ensure_ascii=False), encoding="utf-8")
+    assert "(← 세이코 손목시계)" in buying.page()
