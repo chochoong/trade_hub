@@ -450,6 +450,7 @@ background:var(--card);border:1px solid var(--line);border-radius:10px;padding:7
 .step.ok .dot{background:var(--ok)}.step.bad .dot{background:var(--bad)}.step.run .dot{background:var(--warn)}
 .step.off{opacity:.62}.step.off.cur{opacity:1}.step.home{flex-basis:84px}
 .chips{display:flex;flex-wrap:wrap;gap:6px}.chip{border:1px solid var(--line);border-radius:999px;padding:3px 12px;color:var(--muted)}
+.buylang.on{border-color:var(--accent);background:var(--accent-soft);font-weight:700}
 .chip.on{border-color:var(--accent);color:var(--fg);background:var(--accent-soft)}.chip b{color:var(--accent)}
 .search{position:relative;flex:1 1 320px;max-width:520px}
 .sbox{display:flex}
@@ -1016,16 +1017,54 @@ document.addEventListener("click", function (ev) {
     startJob("/api/research", {query: b.dataset.q});
   }
 });
-document.addEventListener("submit", function (ev) {   // 구매대행 직접 검색 → /api/buysearch (buyagent --search)
+// 구매대행 직접 검색: [영어]·[일본어]·[중국어] 버튼 = 언어 고르기 + 한글이면 그 언어로 번역해 검색창에 넣기
+var HANGUL = /[가-힣ㄱ-ㆎ]/;
+function buyTranslate(f, lang) {
+  var input = f.querySelector('input[name="query"]'), text = input.value.trim();
+  if (!text || !HANGUL.test(text)) return Promise.resolve(text);
+  input.disabled = true;
+  return api("/api/translate", {text: text, lang: lang}).then(function (d) {
+    input.value = d.text; input.title = "원문: " + text; return d.text;
+  }).finally(function () { input.disabled = false; });
+}
+function buyLinks(f, q) {   // 중국 사이트는 자동 검색이 없음 → 검색 결과 페이지 링크 (사람이 직접 확인)
+  var box = f.parentNode.querySelector(".buylinks"), u = encodeURIComponent(q);
+  var sites = [["타오바오", "https://s.taobao.com/search?q=" + u],
+               ["1688", "https://s.1688.com/selloffer/offer_search.htm?charset=utf8&keywords=" + u],
+               ["알리익스프레스", "https://www.aliexpress.com/w/wholesale-" + u + ".html"]];
+  box.innerHTML = "";
+  box.appendChild(document.createTextNode("「" + q + "」 중국 사이트에서 보기: "));
+  sites.forEach(function (s, i) {
+    var a = document.createElement("a");
+    a.href = s[1]; a.target = "_blank"; a.rel = "noopener"; a.textContent = s[0] + " ↗";
+    if (i) box.appendChild(document.createTextNode(" · "));
+    box.appendChild(a);
+  });
+}
+document.addEventListener("click", function (ev) {
+  var b = ev.target.closest("button.buylang");
+  if (!b) return;
+  var f = b.closest("form.buysearch");
+  f.querySelectorAll("button.buylang").forEach(function (x) { x.classList.toggle("on", x === b); });
+  f.querySelector('input[name="lang"]').value = b.dataset.lang;
+  buyTranslate(f, b.dataset.lang).catch(function (err) { alert(err.message); });
+});
+document.addEventListener("submit", function (ev) {   // 검색 → 일본어·영어: /api/buysearch (buyagent --search --market) · 중국어: 링크
   var f = ev.target.closest("form.buysearch");
   if (!f) return;
   ev.preventDefault();
   var body = {};
   new FormData(f).forEach(function (v, k) { body[k] = v; });
-  if (!body.query.trim()) return;
-  var btn = f.querySelector("button"), txt = btn.textContent;
-  btn.disabled = true; btn.textContent = "검색 준비 중…";          // 한글이면 서버가 일본어로 번역하는 동안 (1~3초)
-  startJob("/api/buysearch", body).then(function () { btn.disabled = false; btn.textContent = txt; });
+  if (!(body.query || "").trim()) return;
+  var btn = f.querySelector('button[type="submit"]'), txt = btn.textContent;
+  btn.disabled = true; btn.textContent = "검색 준비 중…";
+  var done = function () { btn.disabled = false; btn.textContent = txt; };
+  if (body.lang === "zh") {
+    buyTranslate(f, "zh").then(function (q) { buyLinks(f, q); }).catch(function (err) { alert(err.message); }).finally(done);
+    return;
+  }
+  f.parentNode.querySelector(".buylinks").innerHTML = "";
+  startJob("/api/buysearch", body).then(done);
 });
 document.addEventListener("submit", function (ev) {   // 3번 협상 폼 → /api/neg (메일은 보내지 않음, 초안만)
   var f = ev.target.closest("form.negf");

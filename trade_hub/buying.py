@@ -158,6 +158,13 @@ def _latest_section(data):
                                          rows, "tight") if rows else '<p class="empty">결과 상품 없음</p>', sub)
 
 
+LANG_BUTTONS = [   # (언어, 버튼 이름, 설명) — 서버 LANG_MARKET 과 맞춤
+    ("en", "영어", "영어로 번역 → 알리익스프레스 자동 검색"),
+    ("ja", "일본어", "일본어로 번역 → 라쿠텐 자동 검색"),
+    ("zh", "중국어", "중국어로 번역 → 타오바오·1688 검색 링크"),
+]
+
+
 def _search_section(data):
     """buyagent --search 결과: 등록하지 않은 상품을 한 번 검색한 최저가 후보 (개당 원가 낮은 순)"""
     from trade_hub.dashboard import clip, e, num, section, table, web_link
@@ -166,13 +173,20 @@ def _search_section(data):
         last = (data.get("search") or {}).get("query") or {}
         opts = "".join(f'<option value="{e(k)}"{" selected" if k == (last.get("category") or "watch") else ""}>{e(n)}</option>'
                        for k, n in categories(data["dir"]))
-        how = (f'<form class="buysearch" style="display:flex;gap:6px;flex-wrap:wrap;margin:6px 0">'
+        langs = "".join(
+            f'<button type="button" class="buylang{" on" if k == "ja" else ""}" data-lang="{k}" title="{e(t)}">{e(n)}</button>'
+            for k, n, t in LANG_BUTTONS)
+        how = (f'<form class="buysearch" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:6px 0">'
+               '<input type="hidden" name="lang" value="ja">'
                '<input name="query" required maxlength="100" autocomplete="off" '
-               'placeholder="검색어 — 한글로 쓰면 일본어로 바꿔서 찾습니다 (예: 세이코 SBTQ041)" style="flex:1;min-width:220px">'
+               'placeholder="검색어 (예: 세이코 SBTQ041) → 언어 버튼을 누르면 번역" style="flex:1;min-width:220px">'
+               f'<span class="buylangs" style="display:inline-flex;gap:2px">{langs}</span>'
                f'<select name="category" title="관세율·마진 기준·차단 규칙이 카테고리마다 다릅니다">{opts}</select>'
                f'<button type="submit">🔎 검색</button></form>'
-               '<p class="small muted">라쿠텐에서 검색해 개당 원가가 낮은 순으로 보여 줍니다 (30초~1분). '
-               '한글이 들어 있으면 buyagent가 일본어 검색어로 바꿔서 찾습니다 (1원 미만 · 같은 검색어는 다시 번역하지 않음). '
+               '<div class="buylinks small"></div>'
+               '<p class="small muted">언어 버튼을 누르면 한글 검색어를 그 언어로 바꿔 검색창에 넣습니다 (고쳐 써도 됩니다 · 1원 미만). '
+               '<b>일본어</b> = 라쿠텐 자동 검색 (30초~1분) · <b>영어</b> = 알리익스프레스 자동 검색 (buyagent에 API 키 필요) · '
+               '<b>중국어</b> = 타오바오·1688 검색 링크 (자동 검색 없음, 직접 확인). '
                '모델명(예: SBTQ041)을 넣으면 그 단어가 들어간 상품만 남겨 부속품을 걸러 냅니다. '
                '감시 목록·가격 이력·알림에는 영향 없습니다.</p>')
     else:
@@ -204,7 +218,8 @@ def _search_section(data):
                      f'{e(o.get("currency"))} {ship}',
                      num(it.get("cost_krw"), "{:,}원"), *cells, clip(" / ".join(it.get("warnings") or []), 60)])
     ko = q.get("keyword_original")                       # 한글로 검색했으면 buyagent가 번역 → 원래 검색어도 보여 줌
-    sub = (f'"{e(q.get("keyword") or "")}"' + (f' (← {e(ko)})' if ko else "") + ' · 카테고리'
+    site = {"rakuten": "라쿠텐", "aliexpress": "알리익스프레스"}.get(q.get("market") or "rakuten", q.get("market"))
+    sub = (f'{e(site)} "{e(q.get("keyword") or "")}"' + (f' (← {e(ko)})' if ko else "") + ' · 카테고리'
            f' {e(q.get("category") or "")} · '
            f'{e((s.get("run_at") or "")[:16].replace("T", " "))} 검색 · 쇼핑몰 결과 {e(s.get("found", 0))}건')
     if not s.get("ok"):

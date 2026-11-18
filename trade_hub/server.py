@@ -33,7 +33,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from trade_hub import buying, dashboard, db
+from trade_hub import buying, dashboard, db, translate
 
 ROOT = Path(__file__).resolve().parent.parent          # trade_hub 저장소 폴더
 CONFIG = ROOT / "supervisor.json"
@@ -82,9 +82,11 @@ def job_command(kind, arg):
             raise ValueError(f"구매 방식: {mode!r}")
         cwd, python, timeout = agent_spec("sourcing")
         return [python, "-m", "sourcing_agent", "from-db", str(int(pid)), "--type", mode], cwd, timeout
-    if kind == "buysearch":                 # 구매대행: arg = (검색어, 카테고리) — buy_search가 검증한 값
-        q, cat = arg
-        return ([sys.executable, "main.py", f"--search={q}", f"--category={cat}"],
+    if kind == "buysearch":                 # 구매대행: arg = (검색어, 카테고리[, 사이트]) — buy_search가 검증한 값
+        q, cat, market = (*arg, "rakuten")[:3]
+        if market not in BUY_MARKETS:
+            raise ValueError(f"사이트: {market!r}")
+        return ([sys.executable, "main.py", f"--search={q}", f"--category={cat}", f"--market={market}"],
                 buying.buyagent_dir(), BUYSEARCH_TIMEOUT)
     if kind == "neg":                       # 3번: arg = negotiation_agent 명령 인자 목록 (neg_args가 검증해서 만든 것)
         cwd, python, timeout = agent_spec("negotiation")
@@ -94,6 +96,9 @@ def job_command(kind, arg):
 
 KIND_AGENT = {"research": "discover", "sourcing": "sourcing", "neg": "negotiation", "buysearch": "buyagent"}
 BUYSEARCH_TIMEOUT = 5                                   # 분 (라쿠텐 검색 페이지 2장 + 크롬 실행)
+# 직접 검색 언어 → buyagent --market (buyagent main.py SEARCH_MARKETS와 같은 값). 중국어는 자동 검색 사이트가 없어 링크만 보여 줌
+BUY_MARKETS = {"rakuten": "라쿠텐(일본)", "aliexpress": "알리익스프레스"}
+LANG_MARKET = {"ja": "rakuten", "en": "aliexpress"}
 
 
 def allowed_roots():
@@ -276,11 +281,29 @@ def buy_search(conn, body):
     cats = dict(buying.categories())
     if cat not in cats:
         return 400, {"error": "카테고리를 골라 주세요."}
+    market = LANG_MARKET.get(str(body.get("lang") or "ja"))
+    if market is None:
+        return 400, {"error": "자동 검색은 일본어(라쿠텐)·영어(알리익스프레스)만 됩니다."}
     with LOCK:
         if any(j["kind"] == "buysearch" and j["status"] == "running" for j in JOBS.values()):
             return 409, {"error": "직접 검색이 이미 실행 중입니다. 끝난 뒤 다시 눌러 주세요."}
-    # 한글 검색어는 buyagent가 일본어로 바꿔서 찾는다 (실행 로그에 "번역: 한글 → 일본어", search.json에 keyword_original)
-    return 200, job_view(start_job("buysearch", (q, cat), f"구매대행 검색: {q} ({cats[cat]})", anchor="buy"))
+    # 한글이 남아 있으면 buyagent가 사이트 언어로 바꿔서 찾는다 (실행 로그에 "번역: …", search.json에 keyword_original)
+    return 200, job_view(start_job("buysearch", (q, cat, market),
+                                   f"구매대행 검색: {q} ({cats[cat]} · {BUY_MARKETS[market]})", anchor="buy"))
+
+
+def buy_translate(conn, body):
+    """검색창 언어 버튼: 한글 검색어 → 영어·일본어·중국어 (화면의 검색창에 넣어 사람이 고칠 수 있게)."""
+    text = " ".join(str(body.get("text") or "").split())
+    lang = str(body.get("lang") or "")
+    if lang not in translate.LANGS:
+        return 400, {"error": "언어를 골라 주세요."}
+    if not text or len(text) > MAX_QUERY:
+        return 400, {"error": f"검색어를 {MAX_QUERY}자 이내로 입력해 주세요."}
+    try:
+        return 200, {"text": translate.to_lang(text, lang), "translated": translate.has_korean(text)}
+    except RuntimeError as err:
+        return 502, {"error": str(err)}
 
 
 # ---------------------------------------------------------------------------
@@ -498,7 +521,8 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return self._send(400, {"error": "요청 형식 오류"})
         route = {"/api/research": research, "/api/select": select,
-                 "/api/neg": negotiation, "/api/buysearch": buy_search}.get(urlparse(self.path).path)
+                 "/api/neg": negotiation, "/api/buysearch": buy_search,
+                 "/api/translate": buy_translate}.get(urlparse(self.path).path)
         if not route:
             return self._send(404, {"error": "없는 주소"})
         conn = db.connect()

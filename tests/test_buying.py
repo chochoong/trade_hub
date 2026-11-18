@@ -143,6 +143,8 @@ def test_search_form_only_in_server_mode(ba):
     assert 'form class="buysearch"' in html and '<option value="watch" selected>시계</option>' in html
     assert 'value="food"' not in html
     assert 'name="query" required maxlength="100" autocomplete="off" placeholder' in html   # 새로 고침하면 빈 칸 (value 없음)
+    assert html.index('data-lang="en"') < html.index('data-lang="ja"') < html.index('data-lang="zh"')
+    assert 'class="buylang on" data-lang="ja"' in html                                      # 기본은 일본어(라쿠텐)
 
 
 

@@ -159,7 +159,10 @@ def test_buy_search_runs_buyagent(srv, monkeypatch, tmp_path):
 def test_buy_search_command(monkeypatch, tmp_path):
     monkeypatch.setenv("BUYAGENT_DIR", str(tmp_path))
     cmd, cwd, _ = ORIGINAL_JOB_COMMAND("buysearch", ("--evil x", "watch"))
-    assert cmd[1:] == ["main.py", "--search=--evil x", "--category=watch"] and cwd == tmp_path   # 옵션으로 오인 안 됨
+    assert cmd[1:] == ["main.py", "--search=--evil x", "--category=watch", "--market=rakuten"] and cwd == tmp_path   # 옵션으로 오인 안 됨
+    assert ORIGINAL_JOB_COMMAND("buysearch", ("x", "watch", "aliexpress"))[0][-1] == "--market=aliexpress"
+    with pytest.raises(ValueError):
+        ORIGINAL_JOB_COMMAND("buysearch", ("x", "watch", "taobao"))
 
 
 
@@ -190,3 +193,30 @@ def test_dotenv_value(tmp_path):
     assert dotenv_value(f, "ANTHROPIC_API_KEY") == "abc def"
     assert dotenv_value(f, "NAVER") == "x" and dotenv_value(f, "NONE") is None
     assert dotenv_value(tmp_path / "없음", "X") is None
+
+
+def test_buy_search_language_picks_market(srv, monkeypatch, tmp_path):
+    from trade_hub import server
+    base = tmp_path / "ba"
+    (base / "config").mkdir(parents=True)
+    (base / "config" / "categories.toml").write_text('[categories.watch]\nname = "시계"\nallowed = true\n', encoding="utf-8")
+    monkeypatch.setenv("BUYAGENT_DIR", str(base))
+    seen = []
+    monkeypatch.setattr(server, "job_command", lambda kind, arg: (seen.append(arg), ([sys.executable, "-c", "pass"], tmp_path, 1))[1])
+    code, job = call(srv + "/api/buysearch", {"query": "Seiko watch", "category": "watch", "lang": "en"})
+    assert code == 200 and seen[-1] == ("Seiko watch", "watch", "aliexpress") and "알리익스프레스" in job["label"]
+    wait_job(srv, job["id"])
+    code, out = call(srv + "/api/buysearch", {"query": "精工", "category": "watch", "lang": "zh"})
+    assert code == 400 and "일본어" in out["error"]                         # 중국어는 자동 검색 없음 (화면은 링크)
+
+
+def test_translate_api(srv, monkeypatch):
+    from trade_hub import translate
+    monkeypatch.setattr(translate, "_call_llm", lambda q, lang: {"zh": "精工 手表", "ja": "セイコー"}[lang])
+    code, out = call(srv + "/api/translate", {"text": "세이코 시계", "lang": "zh"})
+    assert code == 200 and out == {"text": "精工 手表", "translated": True}
+    assert call(srv + "/api/translate", {"text": "SBTQ041", "lang": "ja"})[1] == {"text": "SBTQ041", "translated": False}
+    assert call(srv + "/api/translate", {"text": "x", "lang": "fr"})[0] == 400
+    monkeypatch.setattr(translate, "_call_llm", lambda q, lang: (_ for _ in ()).throw(ConnectionError()))
+    code, out = call(srv + "/api/translate", {"text": "세이코 가방", "lang": "en"})
+    assert code == 502 and "영어로 직접" in out["error"]
