@@ -139,3 +139,24 @@ def test_job_command_builds_type_flag(monkeypatch, tmp_path):
     assert real("sourcing", 7)[0][-2:] == ["--type", "small_batch"]
     with pytest.raises(ValueError):
         real("sourcing", (7, "oem"))                                             # 대시보드에서는 retail·small_batch만
+
+
+def test_buy_search_runs_buyagent(srv, monkeypatch, tmp_path):
+    base = tmp_path / "ba"
+    (base / "config").mkdir(parents=True)
+    (base / "config" / "categories.toml").write_text(
+        '[categories.watch]\nname = "시계"\nallowed = true\n[categories.food]\nname = "식품"\nallowed = false\n',
+        encoding="utf-8")
+    monkeypatch.setenv("BUYAGENT_DIR", str(base))
+    assert call(srv + "/api/buysearch", {"query": " ", "category": "watch"})[0] == 400
+    assert call(srv + "/api/buysearch", {"query": "x", "category": "food"})[0] == 400        # 등록 금지 카테고리
+    assert call(srv + "/api/buysearch", {"query": "x", "category": "watch"}, {"X-Trade-Hub": "0"})[0] == 403
+    code, job = call(srv + "/api/buysearch", {"query": "セイコー  SBTQ041", "category": "watch"})
+    assert code == 200 and job["anchor"] == "buy" and "セイコー SBTQ041" in job["label"]
+    assert wait_job(srv, job["id"])["status"] == "done"
+
+
+def test_buy_search_command(monkeypatch, tmp_path):
+    monkeypatch.setenv("BUYAGENT_DIR", str(tmp_path))
+    cmd, cwd, _ = ORIGINAL_JOB_COMMAND("buysearch", ("--evil x", "watch"))
+    assert cmd[1:] == ["main.py", "--search=--evil x", "--category=watch"] and cwd == tmp_path   # 옵션으로 오인 안 됨

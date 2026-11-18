@@ -5,6 +5,7 @@
   catalog/products.csv       감시 상품 (hub_product_id 열이 있으면 trade_hub 품목 카드로 링크)
   catalog/manual_prices.csv  타오바오·알리 등 직접 입력한 가격 (빈 배송비 = 미확인, 7일 지난 가격 = 다시 확인)
   reports/latest.json        최근 실행 결과 (buyagent가 실행마다 덮어씀, 형식은 buyagent 요청문의 schema 1)
+  reports/search.json        직접 검색 결과 (python main.py --search "검색어" --category 카테고리)
   history.db                 가격 이력
 
 폴더 위치: 환경변수 BUYAGENT_DIR, 없으면 trade_hub 옆의 ../buyagent/buyagent
@@ -29,6 +30,17 @@ def buyagent_dir():
     return Path(os.environ.get("BUYAGENT_DIR") or db.PKG_DIR.parent.parent / "buyagent" / "buyagent")
 
 
+def categories(base=None):
+    """buyagent config/categories.toml 에서 판매 가능한 카테고리 [(키, 이름)] (직접 검색 고르기용)."""
+    import tomllib
+    try:
+        with open(Path(base or buyagent_dir()) / "config" / "categories.toml", "rb") as f:
+            cats = tomllib.load(f).get("categories", {})
+    except (OSError, ValueError):
+        return []
+    return [(k, v.get("name") or k) for k, v in cats.items() if not k.startswith("_") and v.get("allowed")]
+
+
 def _csv(path):
     try:
         with open(path, encoding="utf-8-sig", newline="") as f:
@@ -41,7 +53,7 @@ def load(base=None):
     """buyagent 폴더에서 화면에 필요한 것만 읽는다. 폴더가 없으면 {'exists': False}."""
     base = Path(base or buyagent_dir())
     out = {"dir": base, "exists": (base / "catalog").is_dir(), "products": [], "prices": [], "latest": None,
-           "latest_error": None, "history": [], "history_count": 0}
+           "latest_error": None, "search": None, "search_error": None, "history": [], "history_count": 0}
     if not out["exists"]:
         return out
     out["products"] = _csv(base / "catalog" / "products.csv")
@@ -52,6 +64,12 @@ def load(base=None):
             out["latest"] = json.loads(latest.read_text(encoding="utf-8"))
         except (OSError, ValueError) as e:
             out["latest_error"] = f"{type(e).__name__}: {e}"
+    search = base / "reports" / "search.json"
+    if search.exists():
+        try:
+            out["search"] = json.loads(search.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            out["search_error"] = f"{type(e).__name__}: {e}"
     hist = base / "history.db"
     if hist.exists():
         try:
@@ -140,6 +158,61 @@ def _latest_section(data):
                                          rows, "tight") if rows else '<p class="empty">결과 상품 없음</p>', sub)
 
 
+def _search_section(data):
+    """buyagent --search 결과: 등록하지 않은 상품을 한 번 검색한 최저가 후보 (개당 원가 낮은 순)"""
+    from trade_hub.dashboard import clip, e, num, section, table, web_link
+    from trade_hub.dashboard import SERVER
+    if SERVER["on"]:
+        last = (data.get("search") or {}).get("query") or {}
+        opts = "".join(f'<option value="{e(k)}"{" selected" if k == (last.get("category") or "watch") else ""}>{e(n)}</option>'
+                       for k, n in categories(data["dir"]))
+        how = (f'<form class="buysearch" style="display:flex;gap:6px;flex-wrap:wrap;margin:6px 0">'
+               f'<input name="query" required maxlength="100" placeholder="일본 쇼핑몰 검색어 (예: セイコー SBTQ041)" '
+               f'value="{e(last.get("keyword") or "")}" style="flex:1;min-width:220px">'
+               f'<select name="category" title="관세율·마진 기준·차단 규칙이 카테고리마다 다릅니다">{opts}</select>'
+               f'<button type="submit">🔎 검색</button></form>'
+               '<p class="small muted">라쿠텐에서 검색해 개당 원가가 낮은 순으로 보여 줍니다 (30초~1분 · 무료). '
+               '모델명(예: SBTQ041)을 넣으면 그 단어가 들어간 상품만 남겨 부속품을 걸러 냅니다. '
+               '감시 목록·가격 이력·알림에는 영향 없습니다.</p>')
+    else:
+        how = ('<p class="small muted">검색창은 <code>trade_hub serve</code>로 열면 보입니다. 또는 buyagent 폴더에서 '
+               '<code>python main.py --search "セイコー SBTQ041" --category watch</code></p>')
+    if data.get("search_error"):
+        return section("직접 검색", f'<p class="bad">reports/search.json을 읽지 못했습니다: {e(data["search_error"])}</p>')
+    s = data.get("search")
+    if not s:
+        return section("직접 검색", how + '<p class="empty">아직 직접 검색한 결과가 없습니다.</p>')
+    q = s.get("query") or {}
+    markets = s.get("markets") or []
+    rows = []
+    for i, it in enumerate(s.get("items") or [], 1):
+        if it.get("status") == "blocked":
+            rows.append([str(i), e(it.get("name")), f'<span class="bad">차단</span><div class="small">{clip(it.get("blocked_reason"), 60)}</div>',
+                         "", *["" for _ in markets], ""])
+            continue
+        o = it.get("best_offer") or {}
+        ship = ('<span class="moq unk" title="현지 배송비를 아직 확인하지 않음">배송비 미확인</span>'
+                if o.get("shipping_known") is False else "")
+        shop = web_link(o.get("url"), o.get("shop") or "판매처") or e(o.get("shop") or "")
+        quotes = {x.get("market"): x for x in it.get("quotes") or []}
+        cells = [f'{x.get("recommended_price"):,}원<div class="small muted">마진 {x.get("margin"):,}원</div>'
+                 if (x := quotes.get(m)) and isinstance(x.get("recommended_price"), (int, float))
+                 and isinstance(x.get("margin"), (int, float)) else '<span class="muted">–</span>' for m in markets]
+        rows.append([str(i), f'{shop}<div class="small">{clip(it.get("name"), 70)}</div>',
+                     f'{num(o.get("price"), "{:,.0f}" if o.get("currency") in ("JPY", "KRW") else "{:,.2f}")} '
+                     f'{e(o.get("currency"))} {ship}',
+                     num(it.get("cost_krw"), "{:,}원"), *cells, clip(" / ".join(it.get("warnings") or []), 60)])
+    sub = (f'"{e(q.get("keyword") or "")}" · 카테고리 {e(q.get("category") or "")} · '
+           f'{e((s.get("run_at") or "")[:16].replace("T", " "))} 검색 · 쇼핑몰 결과 {e(s.get("found", 0))}건')
+    if not s.get("ok"):
+        sub += f' · <span class="bad">실패: {e(s.get("error") or "")}</span>'
+    excl = s.get("excluded") or {}
+    note = (f'<p class="small muted">걸러낸 결과: {e(", ".join(f"{k} {v}건" for k, v in excl.items()))}</p>' if excl else "")
+    body = (table(["#", "판매처·상품명", "현지가", "개당 원가", *[f"{m} 권장가" for m in markets], "경고"], rows, "tight")
+            if rows else '<p class="empty">조건에 맞는 재고 있는 판매처 없음</p>')
+    return section("직접 검색", how + body + note, sub)
+
+
 def _products_section(data):
     from trade_hub.dashboard import clip, e, section, table
     rows = []
@@ -197,4 +270,4 @@ def page(data=None):
              f'<ul>{"".join(f"<li>{e(x)}</li>" for x in roles)}</ul><p class="small">{state}</p></div></section>')
     if not data["exists"]:
         return intro
-    return intro + _latest_section(data) + _products_section(data) + _prices_section(data) + _history_section(data)
+    return intro + _latest_section(data) + _search_section(data) + _products_section(data) + _prices_section(data) + _history_section(data)

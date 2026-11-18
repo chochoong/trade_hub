@@ -1016,6 +1016,15 @@ document.addEventListener("click", function (ev) {
     startJob("/api/research", {query: b.dataset.q});
   }
 });
+document.addEventListener("submit", function (ev) {   // 구매대행 직접 검색 → /api/buysearch (buyagent --search)
+  var f = ev.target.closest("form.buysearch");
+  if (!f) return;
+  ev.preventDefault();
+  var body = {};
+  new FormData(f).forEach(function (v, k) { body[k] = v; });
+  if (!body.query.trim()) return;
+  startJob("/api/buysearch", body);
+});
 document.addEventListener("submit", function (ev) {   // 3번 협상 폼 → /api/neg (메일은 보내지 않음, 초안만)
   var f = ev.target.closest("form.negf");
   if (!f) return;

@@ -97,3 +97,48 @@ def test_dashboard_has_buying_tab_next_to_sourcing(ba, conn, tmp_path):
     nav = html[html.index('<nav class="pipe-nav">'):html.index("</nav>")]
     assert nav.index('href="#a2"') < nav.index('href="#buy"') < nav.index('href="#a3"')   # 2 공급처 바로 옆
     assert 'id="p-buy"' in html and "구매대행 (buyagent)" in html
+
+
+def test_search_results(ba):
+    html = buying.page()
+    assert "아직 직접 검색한 결과가 없습니다" in html
+    (ba / "reports").mkdir()
+    (ba / "reports" / "search.json").write_text(json.dumps({
+        "ok": True, "error": None, "run_at": "2026-11-18T11:00:00",
+        "query": {"keyword": "セイコー SBTQ041", "category": "watch", "must_include": ["SBTQ041"], "exclude": []},
+        "markets": ["coupang"], "found": 90, "excluded": {"상품명 불일치": 25},
+        "items": [{"kind": "검색", "id": "search", "hub_product_id": None, "name": "セイコー SBTQ041 <正規品>",
+                   "category": "watch", "status": "ok", "blocked_reason": None,
+                   "best_offer": {"source": "rakuten_web", "shop": "スリーエス", "url": "https://item.rakuten.co.jp/a/",
+                                  "price": 14630, "shipping": 0, "shipping_known": True, "currency": "JPY",
+                                  "in_stock": True},
+                   "cost_krw": 140565, "quotes": [{"market": "coupang", "recommended_price": 182900, "margin": 20405,
+                                                   "my_price": None, "my_margin": None}],
+                   "warnings": ["한정·예약 상품"], "events": [], "notice": None}],
+    }, ensure_ascii=False), encoding="utf-8")
+    html = buying.page()
+    assert "セイコー SBTQ041 &lt;正規品&gt;" in html
+    assert "140,565원" in html and "182,900원" in html
+    assert 'href="https://item.rakuten.co.jp/a/"' in html
+    assert "상품명 불일치 25건" in html
+
+
+def test_search_json_broken(ba):
+    (ba / "reports").mkdir()
+    (ba / "reports" / "search.json").write_text("{", encoding="utf-8")
+    assert "search.json을 읽지 못했습니다" in buying.page()
+
+
+def test_search_form_only_in_server_mode(ba):
+    (ba / "config").mkdir()
+    (ba / "config" / "categories.toml").write_text(
+        '[categories.watch]\nname = "시계"\nallowed = true\n[categories.food]\nname = "식품"\nallowed = false\n',
+        encoding="utf-8")
+    assert 'form class="buysearch"' not in buying.page()
+    dashboard.SERVER["on"] = True
+    try:
+        html = buying.page()
+    finally:
+        dashboard.SERVER["on"] = False
+    assert 'form class="buysearch"' in html and '<option value="watch" selected>시계</option>' in html
+    assert 'value="food"' not in html

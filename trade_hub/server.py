@@ -4,6 +4,7 @@ trade_hub serve — 내 PC에서만 열리는 대시보드 서버 (http://127.0.
 정적 대시보드(trade_hub dashboard)와 같은 화면에 다음을 더한다.
   · 검색창 → DB에 없는 품목은 [새로 조사] → 1번 에이전트 지정 품목 조사 (supplier_agent.py --product)
   · 후보 품목 [공급처 찾기] → 사람이 선정(candidate → sourcing) + 2번 에이전트 실행 (sourcing_agent from-db <번호>)
+  · 구매대행 '직접 검색' → buyagent main.py --search (일본 쇼핑몰 최저가·원가·권장가, DB에 기록하지 않음)
   · 3번 협상 페이지: [견적 요청 초안]·[답장 붙여넣기]·[역제안]·[후속 메일]·[검토 완료/발송 완료/버림]
     → 3번 에이전트 실행 (python -m negotiation_agent ...). 메일은 보내지 않는다 — 발송은 사람이 직접 하고 '발송 완료'만 누른다.
   · 실행 중인 작업 패널 (진행 로그), 끝나면 결과 품목으로 이동
@@ -31,7 +32,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from trade_hub import dashboard, db
+from trade_hub import buying, dashboard, db
 
 ROOT = Path(__file__).resolve().parent.parent          # trade_hub 저장소 폴더
 CONFIG = ROOT / "supervisor.json"
@@ -80,13 +81,18 @@ def job_command(kind, arg):
             raise ValueError(f"구매 방식: {mode!r}")
         cwd, python, timeout = agent_spec("sourcing")
         return [python, "-m", "sourcing_agent", "from-db", str(int(pid)), "--type", mode], cwd, timeout
+    if kind == "buysearch":                 # 구매대행: arg = (검색어, 카테고리) — buy_search가 검증한 값
+        q, cat = arg
+        return ([sys.executable, "main.py", f"--search={q}", f"--category={cat}"],
+                buying.buyagent_dir(), BUYSEARCH_TIMEOUT)
     if kind == "neg":                       # 3번: arg = negotiation_agent 명령 인자 목록 (neg_args가 검증해서 만든 것)
         cwd, python, timeout = agent_spec("negotiation")
         return [python, "-m", "negotiation_agent", *arg], cwd, timeout
     raise ValueError(kind)
 
 
-KIND_AGENT = {"research": "discover", "sourcing": "sourcing", "neg": "negotiation"}
+KIND_AGENT = {"research": "discover", "sourcing": "sourcing", "neg": "negotiation", "buysearch": "buyagent"}
+BUYSEARCH_TIMEOUT = 5                                   # 분 (라쿠텐 검색 페이지 2장 + 크롬 실행)
 
 
 def allowed_roots():
@@ -126,7 +132,7 @@ def _kill(proc):
         proc.kill()
 
 
-def start_job(kind, arg, label, product_id=None):
+def start_job(kind, arg, label, product_id=None, anchor=None):
     cmd, cwd, timeout = job_command(kind, arg)
     if not Path(cwd).is_dir():
         raise RuntimeError(f"에이전트 폴더가 없습니다: {cwd} (supervisor.json의 cwd 확인)")
@@ -134,7 +140,7 @@ def start_job(kind, arg, label, product_id=None):
     logs = db.default_path().parent / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     job = {"id": job_id, "kind": kind, "agent": KIND_AGENT[kind], "label": label, "status": "running",
-           "product_id": product_id, "anchor": None, "lines": [], "started": time.time(), "ended": None, "exit_code": None,
+           "product_id": product_id, "anchor": anchor, "lines": [], "started": time.time(), "ended": None, "exit_code": None,
            "log": str(logs / f"{datetime.now():%Y%m%d_%H%M%S}_serve_{kind}.log")}
     env = {**os.environ, "TRADE_DB": str(db.default_path().resolve()), "PYTHONIOENCODING": "utf-8"}
     proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -236,6 +242,23 @@ def select(conn, body):
             db.set_stage(conn, pid, "sourcing", note="사람이 선정 → 공급처 발굴로 (대시보드)")
     return 200, job_view(start_job("sourcing", (pid, mode), f"2번 {PURCHASE_MODES[mode]}용 공급처 찾기: #{pid} {row['name']}",
                                    product_id=pid))
+
+
+def buy_search(conn, body):
+    """구매대행 직접 검색: buyagent 를 --search 로 한 번 실행 → reports/search.json → 구매대행 화면에 표시."""
+    q = " ".join(str(body.get("query") or "").split())
+    cat = str(body.get("category") or "")
+    if not q:
+        return 400, {"error": "검색어를 입력해 주세요. (일본 쇼핑몰 검색어, 예: セイコー SBTQ041)"}
+    if len(q) > MAX_QUERY:
+        return 400, {"error": f"검색어는 {MAX_QUERY}자 이내로 입력해 주세요."}
+    cats = dict(buying.categories())
+    if cat not in cats:
+        return 400, {"error": "카테고리를 골라 주세요."}
+    with LOCK:
+        if any(j["kind"] == "buysearch" and j["status"] == "running" for j in JOBS.values()):
+            return 409, {"error": "직접 검색이 이미 실행 중입니다. 끝난 뒤 다시 눌러 주세요."}
+    return 200, job_view(start_job("buysearch", (q, cat), f"구매대행 검색: {q} ({cats[cat]})", anchor="buy"))
 
 
 # ---------------------------------------------------------------------------
@@ -436,19 +459,24 @@ class Handler(BaseHTTPRequestHandler):
 
     # --- POST (실행) ---
     def do_POST(self):
+        # 거절하더라도 본문은 먼저 읽는다 — 안 읽고 응답하면 Windows에서 연결이 끊겨(ConnectionAbortedError) 응답을 못 받는다
+        try:
+            length = min(int(self.headers.get("Content-Length") or 0), 200_000)   # 답장 붙여넣기 (한글·중국어 UTF-8 포함)
+        except ValueError:
+            length = 0
+        raw = self.rfile.read(length) if length > 0 else b""
         if not self._host_ok():
             return self._send(403, {"error": "허용되지 않은 Host"})
         if self.headers.get("X-Trade-Hub") != "1" or "application/json" not in (self.headers.get("Content-Type") or ""):
             return self._send(403, {"error": "대시보드에서만 실행할 수 있습니다"})
         try:
-            length = min(int(self.headers.get("Content-Length") or 0), 200_000)   # 답장 붙여넣기 (한글·중국어 UTF-8 포함)
-            body = json.loads(self.rfile.read(length) or b"{}")
+            body = json.loads(raw or b"{}")
             if not isinstance(body, dict):
                 raise ValueError
         except ValueError:
             return self._send(400, {"error": "요청 형식 오류"})
         route = {"/api/research": research, "/api/select": select,
-                 "/api/neg": negotiation}.get(urlparse(self.path).path)
+                 "/api/neg": negotiation, "/api/buysearch": buy_search}.get(urlparse(self.path).path)
         if not route:
             return self._send(404, {"error": "없는 주소"})
         conn = db.connect()
