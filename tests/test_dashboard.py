@@ -203,3 +203,13 @@ def test_candidate_has_two_mode_buttons(conn, monkeypatch):
     html = dashboard.render(conn, server=True)
     assert ">구매대행용 찾기</button>" in html and ">소량 사입용 찾기</button>" in html
     assert '<option value="China">중국</option><option value="Japan">일본</option>' in html   # 기본 중국
+
+
+def test_sourcing_error_prefix_hidden(conn):
+    assert dashboard.run_error("SourcingError: 검색 결과가 없습니다. 검색어를 바꿔 보세요") == "검색 결과가 없습니다. 검색어를 바꿔 보세요"
+    assert dashboard.run_error("OSError: [Errno 2] 없음") == "OSError: [Errno 2] 없음"      # 다른 예외는 그대로
+    assert dashboard.run_error(None) == ""
+    with conn:
+        conn.execute("INSERT INTO agent_runs (agent, status, error) VALUES ('sourcing', 'failed', 'SourcingError: 키가 없습니다')")
+    html = dashboard.runs(conn, "sourcing")
+    assert "키가 없습니다" in html and "SourcingError" not in html

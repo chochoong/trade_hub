@@ -394,6 +394,18 @@ def products_in_progress(conn):
     return "".join(cards), len(prods)
 
 
+FRIENDLY_ERRORS = ("SourcingError: ",)   # 에이전트가 한국어 안내 문구를 담아 올리는 예외 → 클래스 이름은 떼고 보여 줌
+
+
+def run_error(text):
+    """agent_runs.error ("예외이름: 메시지") 화면 표시용. 안내용 예외만 접두어를 떼고, 나머지는 그대로."""
+    text = text or ""
+    for prefix in FRIENDLY_ERRORS:
+        if text.startswith(prefix):
+            return text[len(prefix):]
+    return text
+
+
 def runs(conn, agent=None):
     rows = (conn.execute("SELECT * FROM agent_runs WHERE agent = ? ORDER BY id DESC LIMIT 15", (agent,)) if agent
             else conn.execute("SELECT * FROM agent_runs ORDER BY id DESC LIMIT 15")).fetchall()
@@ -411,7 +423,7 @@ def runs(conn, agent=None):
             html = next((Path(rep) / n for n in ("candidates.html", "report.html", "report.md") if (Path(rep) / n).exists()), None)
             rep_html = link(html or rep, Path(rep).name)
         out.append([f"#{r['id']}", e(AGENT_LABEL.get(r["agent"], r["agent"])), status, e(r["started_at"][:16]), dur,
-                    e(r["model"]), rep_html, clip(r["error"], 60)])
+                    e(r["model"]), rep_html, clip(run_error(r["error"]), 60)])
     return table(["실행", "에이전트", "결과", "시작", "소요", "모델", "결과물", "오류"], out)
 
 
