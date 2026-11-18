@@ -11,6 +11,7 @@
   trade_hub briefing                # 최신 슈퍼바이저 브리핑
   trade_hub dashboard [--no-open] [--no-ref]   # 대시보드 HTML(data/dashboard.html) 만들고 열기 (DB 읽기 전용)
                                     #   --no-ref: 네이버 참고 이미지 검색 안 함
+  trade_hub serve [--port 8765] [--no-open] [--no-ref]   # 대시보드 서버: 검색·새 조사·[공급처 찾기] (이 PC에서만)
   trade_hub photo 16 사진.jpg        # 품목 확정 사진 등록 (data/images/16.jpg로 복사)
   trade_hub photo 16 --clear        # 확정 사진 삭제
 
@@ -139,6 +140,10 @@ def main(argv=None):
         done(conn, rest, status="dismissed")
     elif cmd == "briefing":
         briefing(conn)
+    elif cmd == "serve":
+        from trade_hub import server
+        port = int(rest[rest.index("--port") + 1]) if "--port" in rest and rest.index("--port") + 1 < len(rest) else server.DEFAULT_PORT
+        server.serve(port, open_browser="--no-open" not in rest, refs="--no-ref" not in rest)
     elif cmd == "photo":
         photo(conn, rest)
     elif cmd == "dashboard":

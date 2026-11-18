@@ -23,12 +23,15 @@
       "timeout_minutes": 60
     },
     "negotiation": {
-      "enabled": false,
-      "command": ["{python}", "negotiation_agent.py"],
+      "enabled": true,
+      "command": ["{python}", "-m", "negotiation_agent", "auto"],
       "cwd": "../negotiation_agent",
-      "when_sql": "SELECT COUNT(*) FROM messages m WHERE m.direction = 'inbound' AND NOT EXISTS (SELECT 1 FROM quotes q WHERE q.message_id = m.id)",
+      "_when": "분석 안 된 받은 답장 + 후속 메일이 필요한 보낸 메일(3일 무응답, 최대 2회). negotiation_agent/negotiation_agent/hub.py FOLLOWUP_DUE_SQL과 같은 조건 — 바꾸면 같이 바꿀 것",
+      "when_sql": "SELECT (SELECT COUNT(*) FROM messages WHERE direction = 'inbound' AND analysis_json IS NULL) + (SELECT COUNT(*) FROM messages m JOIN product_suppliers ps ON ps.id = m.product_supplier_id JOIN products p ON p.id = ps.product_id WHERE m.direction = 'outbound' AND m.status = 'sent' AND m.kind != 'follow_up' AND m.sent_at IS NOT NULL AND ps.status != 'rejected' AND p.stage NOT IN ('closed', 'dropped') AND NOT EXISTS (SELECT 1 FROM messages r WHERE r.product_supplier_id = m.product_supplier_id AND r.direction = 'inbound' AND COALESCE(r.sent_at, r.created_at) >= m.sent_at) AND NOT EXISTS (SELECT 1 FROM messages n WHERE n.product_supplier_id = m.product_supplier_id AND n.direction = 'outbound' AND n.kind != 'follow_up' AND n.status = 'sent' AND n.id > m.id) AND NOT EXISTS (SELECT 1 FROM messages f WHERE f.reply_to_id = m.id AND f.kind = 'follow_up' AND f.status IN ('draft', 'approved', 'discarded')) AND (SELECT COUNT(*) FROM messages f WHERE f.reply_to_id = m.id AND f.kind = 'follow_up' AND f.status = 'sent') < 2 AND julianday('now', 'localtime') - julianday(COALESCE( (SELECT MAX(f.sent_at) FROM messages f WHERE f.reply_to_id = m.id AND f.kind = 'follow_up' AND f.status = 'sent'), m.sent_at)) >= 3)",
+      "_every": "Gmail 연동(negotiation_agent gmail-login)을 했으면 auto가 Gmail에서 발송 확인·새 답장을 가져온다 — DB만으로는 새 메일을 알 수 없어 2시간 주기로도 실행",
+      "every_hours": 2,
       "min_interval_hours": 2,
-      "timeout_minutes": 30
+      "timeout_minutes": 20
     },
     "compliance": {
       "enabled": false,

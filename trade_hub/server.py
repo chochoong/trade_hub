@@ -1,0 +1,488 @@
+"""
+trade_hub serve — 내 PC에서만 열리는 대시보드 서버 (http://127.0.0.1:8765).
+
+정적 대시보드(trade_hub dashboard)와 같은 화면에 다음을 더한다.
+  · 검색창 → DB에 없는 품목은 [새로 조사] → 1번 에이전트 지정 품목 조사 (supplier_agent.py --product)
+  · 후보 품목 [공급처 찾기] → 사람이 선정(candidate → sourcing) + 2번 에이전트 실행 (sourcing_agent from-db <번호>)
+  · 3번 협상 페이지: [견적 요청 초안]·[답장 붙여넣기]·[역제안]·[후속 메일]·[검토 완료/발송 완료/버림]
+    → 3번 에이전트 실행 (python -m negotiation_agent ...). 메일은 보내지 않는다 — 발송은 사람이 직접 하고 '발송 완료'만 누른다.
+  · 실행 중인 작업 패널 (진행 로그), 끝나면 결과 품목으로 이동
+  · 리포트·사진 같은 로컬 파일 보기 (/file — 허용된 폴더만)
+
+원칙
+  · 에이전트 일은 에이전트가 한다: 서버는 각 에이전트를 별도 프로세스로 실행만 한다 (슈퍼바이저와 같은 방식,
+    실행 폴더·파이썬은 supervisor.json 설정 사용, TRADE_DB 전달). 결과는 각 에이전트가 공용 DB에 기록한다.
+  · candidate → sourcing 은 사람이 버튼을 눌러 결정한다. 메일 발송·결제 같은 기능은 없다.
+  · 같은 에이전트가 이미 실행 중이면(이 서버 또는 슈퍼바이저) 새로 실행하지 않는다.
+
+보안: 127.0.0.1에만 열고, Host 헤더를 확인하며(DNS 리바인딩 방지), 실행 요청(POST)은
+      커스텀 헤더 X-Trade-Hub: 1 이 있어야 받는다(다른 사이트에서 몰래 보내는 요청 차단).
+"""
+
+import json
+import mimetypes
+import os
+import subprocess
+import sys
+import threading
+import time
+from datetime import datetime, timedelta
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+from trade_hub import dashboard, db
+
+ROOT = Path(__file__).resolve().parent.parent          # trade_hub 저장소 폴더
+CONFIG = ROOT / "supervisor.json"
+HOST = "127.0.0.1"
+DEFAULT_PORT = 8765
+MAX_QUERY = 100
+REF_TTL = 3600                                          # 참고 이미지 다시 검색하는 간격(초)
+
+JOBS = {}                                               # 작업 id → dict (메모리, 서버를 끄면 사라짐)
+LOCK = threading.Lock()
+RENDER_LOCK = threading.Lock()                          # dashboard 모듈 상태(SERVER·_REFS)를 한 번에 하나만
+_REF_STATE = {"at": 0.0, "need": None}
+
+
+# ---------------------------------------------------------------------------
+# 에이전트 실행 설정 (supervisor.json 공유)
+# ---------------------------------------------------------------------------
+def agent_spec(agent):
+    """(실행 폴더, 파이썬, 제한 시간 분). 슈퍼바이저 설정의 command 첫 항목이 파이썬 경로면 그것
+    (예: 2번 전용 venv), "{python}"이거나 없으면 이 서버를 돌리는 파이썬."""
+    cfg = json.loads(CONFIG.read_text(encoding="utf-8"))
+    spec = cfg.get("agents", {}).get(agent) or {}
+    cwd = (CONFIG.parent / spec.get("cwd", ".")).resolve()
+    python = sys.executable
+    first = (spec.get("command") or ["{python}"])[0]
+    if first != "{python}" and Path(first).name.lower().startswith("python"):
+        cand = Path(first)
+        cand = cand if cand.is_absolute() else cwd / cand
+        if cand.exists():
+            python = str(cand)
+    return cwd, python, int(spec.get("timeout_minutes") or 60)
+
+
+# 대시보드에서 고를 수 있는 2번 구매 방식 (슈퍼바이저 자동 실행은 supervisor.json대로 small_batch만)
+PURCHASE_MODES = {"retail": "구매대행", "small_batch": "소량 사입"}
+
+
+def job_command(kind, arg):
+    """(명령, 실행 폴더, 제한 시간 분). 테스트에서 바꿔 끼울 수 있게 함수로 둔다."""
+    if kind == "research":
+        cwd, python, timeout = agent_spec("discover")
+        return [python, "supplier_agent.py", "--product", arg, "--no-open"], cwd, timeout
+    if kind == "sourcing":                  # arg = (품목 번호, 구매 방식) — select가 PURCHASE_MODES로 검증한 값
+        pid, mode = arg if isinstance(arg, tuple) else (arg, "small_batch")
+        if mode not in PURCHASE_MODES:
+            raise ValueError(f"구매 방식: {mode!r}")
+        cwd, python, timeout = agent_spec("sourcing")
+        return [python, "-m", "sourcing_agent", "from-db", str(int(pid)), "--type", mode], cwd, timeout
+    if kind == "neg":                       # 3번: arg = negotiation_agent 명령 인자 목록 (neg_args가 검증해서 만든 것)
+        cwd, python, timeout = agent_spec("negotiation")
+        return [python, "-m", "negotiation_agent", *arg], cwd, timeout
+    raise ValueError(kind)
+
+
+KIND_AGENT = {"research": "discover", "sourcing": "sourcing", "neg": "negotiation"}
+
+
+def allowed_roots():
+    """/file 로 보여 줄 수 있는 폴더: 확정 사진(data/images), 1번 리포트, 2번 출력. (DB 파일·백업·.env는 제외)"""
+    roots = [db.images_dir().resolve()]
+    for agent, sub in (("discover", "reports"), ("sourcing", "output")):
+        try:
+            roots.append((agent_spec(agent)[0] / sub).resolve())
+        except Exception:
+            pass
+    return roots
+
+
+# ---------------------------------------------------------------------------
+# 작업 실행
+# ---------------------------------------------------------------------------
+def busy_reason(conn, agent):
+    """이미 실행 중이면 이유 문자열, 아니면 None."""
+    with LOCK:
+        if any(j["agent"] == agent and j["status"] == "running" for j in JOBS.values()):
+            return "이 서버에서 같은 에이전트가 이미 실행 중입니다. 끝난 뒤 다시 눌러 주세요."
+    _, _, timeout = agent_spec(agent)
+    since = (datetime.now() - timedelta(minutes=timeout)).strftime("%Y-%m-%dT%H:%M:%S")
+    row = conn.execute("SELECT id FROM agent_runs WHERE agent = ? AND status = 'running' AND started_at >= ?",
+                       (agent, since)).fetchone()
+    if row:
+        return f"다른 곳(슈퍼바이저 등)에서 실행 중입니다 (실행 #{row['id']}). 끝난 뒤 다시 눌러 주세요."
+    return None
+
+
+def _kill(proc):
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":       # 자식 프로세스까지 종료
+        subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
+    else:
+        proc.kill()
+
+
+def start_job(kind, arg, label, product_id=None):
+    cmd, cwd, timeout = job_command(kind, arg)
+    if not Path(cwd).is_dir():
+        raise RuntimeError(f"에이전트 폴더가 없습니다: {cwd} (supervisor.json의 cwd 확인)")
+    job_id = f"{datetime.now():%H%M%S}-{len(JOBS) + 1}"
+    logs = db.default_path().parent / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    job = {"id": job_id, "kind": kind, "agent": KIND_AGENT[kind], "label": label, "status": "running",
+           "product_id": product_id, "anchor": None, "lines": [], "started": time.time(), "ended": None, "exit_code": None,
+           "log": str(logs / f"{datetime.now():%Y%m%d_%H%M%S}_serve_{kind}.log")}
+    env = {**os.environ, "TRADE_DB": str(db.default_path().resolve()), "PYTHONIOENCODING": "utf-8"}
+    proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            stdin=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace")
+    with LOCK:
+        JOBS[job_id] = job
+    threading.Thread(target=_watch, args=(job, proc, timeout), daemon=True).start()
+    return job
+
+
+def _watch(job, proc, timeout):
+    def on_timeout():
+        job["timed_out"] = True
+        _kill(proc)
+
+    timer = threading.Timer(timeout * 60, on_timeout)
+    timer.start()
+    with open(job["log"], "w", encoding="utf-8") as f:
+        f.write(f"$ {' '.join(map(str, proc.args))}\n")
+        for line in proc.stdout:
+            f.write(line)
+            f.flush()                      # 실행 중에도 로그 파일로 진행 상황을 볼 수 있게
+            line = line.rstrip()
+            if line.startswith("RESULT_PRODUCT_ID="):
+                try:
+                    job["product_id"] = int(line.split("=", 1)[1])
+                except ValueError:
+                    pass
+                continue
+            if line.startswith("RESULT_ANCHOR="):  # 3번: 끝나면 이동할 화면 위치 (예: ps-12)
+                anchor = line.split("=", 1)[1].strip()
+                if anchor.replace("-", "").isalnum():
+                    job["anchor"] = anchor
+                continue
+            if line.strip():
+                with LOCK:
+                    job["lines"] = (job["lines"] + [line])[-6:]
+    code = proc.wait()
+    timer.cancel()
+    with LOCK:
+        job["exit_code"], job["ended"] = code, time.time()
+        job["status"] = "done" if code == 0 else "failed"
+        if job.get("timed_out"):
+            job["lines"] = (job["lines"] + [f"제한 시간 {timeout}분 초과로 중단했습니다"])[-6:]
+
+
+def job_view(j):
+    sec = int((j["ended"] or time.time()) - j["started"])
+    return {k: j.get(k) for k in ("id", "kind", "label", "status", "product_id", "anchor", "lines", "exit_code")} | {
+        "elapsed": f"{sec // 60}분 {sec % 60}초" if sec >= 60 else f"{sec}초"}
+
+
+# ---------------------------------------------------------------------------
+# 요청 처리
+# ---------------------------------------------------------------------------
+def search(conn, q, limit=10):
+    words = [w for w in q.lower().split() if w]
+    if not words:
+        return []
+    rows = conn.execute("SELECT id, name, stage, category, search_keyword_en, keywords_ko_json FROM products").fetchall()
+    out = []
+    for r in rows:
+        hay = " ".join(str(r[k] or "") for k in ("name", "category", "search_keyword_en", "keywords_ko_json")).lower()
+        if all(w in hay for w in words):
+            out.append({"id": r["id"], "name": r["name"], "stage": r["stage"]})
+    return out[:limit]
+
+
+def research(conn, body):
+    q = " ".join(str(body.get("query") or "").split())
+    if not q:
+        return 400, {"error": "품목명을 입력해 주세요."}
+    if len(q) > MAX_QUERY:
+        return 400, {"error": f"품목명은 {MAX_QUERY}자 이내로 입력해 주세요."}
+    reason = busy_reason(conn, "discover")
+    if reason:
+        return 409, {"error": reason}
+    return 200, job_view(start_job("research", q, f"1번 조사: {q}"))
+
+
+def select(conn, body):
+    try:
+        pid = int(body.get("product_id"))
+    except (TypeError, ValueError):
+        return 400, {"error": "품목 번호가 필요합니다."}
+    mode = body.get("mode") or "small_batch"
+    if mode not in PURCHASE_MODES:
+        return 400, {"error": f"구매 방식은 {', '.join(PURCHASE_MODES)} 중 하나여야 합니다."}
+    row = conn.execute("SELECT name, stage FROM products WHERE id = ?", (pid,)).fetchone()
+    if row is None:
+        return 404, {"error": f"품목 번호 {pid}가 없습니다."}
+    if row["stage"] not in ("candidate", "sourcing"):
+        return 400, {"error": f"#{pid}는 이미 {dashboard.STAGE_LABEL.get(row['stage'], row['stage'])} 단계입니다."}
+    reason = busy_reason(conn, "sourcing")
+    if reason:
+        return 409, {"error": reason}
+    if row["stage"] == "candidate":           # 사람이 버튼으로 결정 → 단계 이동 (trade_hub select와 같음)
+        with conn:
+            db.set_stage(conn, pid, "sourcing", note="사람이 선정 → 공급처 발굴로 (대시보드)")
+    return 200, job_view(start_job("sourcing", (pid, mode), f"2번 {PURCHASE_MODES[mode]}용 공급처 찾기: #{pid} {row['name']}",
+                                   product_id=pid))
+
+
+# ---------------------------------------------------------------------------
+# 3번 협상 (negotiation_agent) — 서버는 입력을 검증해 명령 인자로 바꾸고 실행만 한다. DB 기록은 3번이 한다.
+# ---------------------------------------------------------------------------
+NEG_LANGS = {"en", "zh"}
+NEG_TONES = {"soft": "부드럽게", "normal": "보통", "firm": "강하게"}
+NEG_MARKS = {"approved": "검토 완료", "sent": "발송 완료", "discarded": "버림", "draft": "초안으로 되돌림"}
+INCOTERMS = {"", "EXW", "FOB", "CFR", "CIF", "DAP", "DDP"}
+MAX_REPLY = 20_000
+
+
+class BadRequest(ValueError):
+    pass
+
+
+def _id(body, key):
+    try:
+        v = int(body.get(key))
+    except (TypeError, ValueError):
+        raise BadRequest(f"{key}가 필요합니다.")
+    if v <= 0:
+        raise BadRequest(f"{key}가 올바르지 않습니다.")
+    return v
+
+
+def _text(body, key, limit=500):
+    v = " ".join(str(body.get(key) or "").split())
+    if len(v) > limit:
+        raise BadRequest(f"{key}는 {limit}자 이내로 입력해 주세요.")
+    return v
+
+
+def _row(conn, sql, value, what):
+    row = conn.execute(sql, (value,)).fetchone()
+    if row is None:
+        raise BadRequest(f"{what} #{value}가 없습니다.")
+    return row
+
+
+PS_NAME_SQL = """SELECT ps.id, s.company FROM product_suppliers ps JOIN suppliers s ON s.id = ps.supplier_id
+                 WHERE ps.id = ?"""
+MSG_NAME_SQL = """SELECT m.id, m.direction, s.company FROM messages m JOIN product_suppliers ps ON ps.id = m.product_supplier_id
+                  JOIN suppliers s ON s.id = ps.supplier_id WHERE m.id = ?"""
+
+
+def neg_args(conn, body):
+    """대시보드 요청 → (negotiation_agent 인자 목록, 작업 이름). 값은 '--옵션=값' 형태로 넘겨 옵션으로 오인되지 않게 한다."""
+    action = body.get("action")
+    lang = body.get("lang") or "en"
+    if lang not in NEG_LANGS:
+        raise BadRequest("언어는 en 또는 zh")
+    if action == "rfq":
+        ps = _row(conn, PS_NAME_SQL, _id(body, "ps_id"), "공급처 연결")
+        inco = str(body.get("incoterm") or "").upper()
+        if inco not in INCOTERMS:
+            raise BadRequest("인코텀즈 값이 올바르지 않습니다.")
+        args = ["rfq", str(ps["id"]), f"--lang={lang}"]
+        args += [f"--qty={v}" for v in [_text(body, "qty", 60)] if v]
+        args += [f"--incoterm={inco}"] if inco else []
+        args += [f"--note={v}" for v in [_text(body, "note")] if v]
+        args += ["--force"] if body.get("force") else []
+        return args, f"3번 견적 요청 초안: {ps['company']}"
+    if action == "reply":
+        ps = _row(conn, PS_NAME_SQL, _id(body, "ps_id"), "공급처 연결")
+        text = str(body.get("text") or "").strip()
+        if not text:
+            raise BadRequest("답장 내용을 붙여넣어 주세요.")
+        if len(text) > MAX_REPLY:
+            raise BadRequest(f"답장은 {MAX_REPLY:,}자 이내로 붙여넣어 주세요.")
+        inbox = db.default_path().parent / "inbox"          # 긴 글은 명령줄 대신 파일로 넘기고 3번이 저장 후 지움
+        inbox.mkdir(parents=True, exist_ok=True)
+        path = inbox / f"{datetime.now():%Y%m%d_%H%M%S_%f}_ps{ps['id']}.txt"
+        path.write_text(text, encoding="utf-8")
+        return ["reply", str(ps["id"]), f"--file={path}", "--delete-file"], f"3번 답장 저장·분석: {ps['company']}"
+    if action == "counter":
+        q = _row(conn, "SELECT q.id, s.company FROM quotes q JOIN product_suppliers ps ON ps.id = q.product_supplier_id "
+                       "JOIN suppliers s ON s.id = ps.supplier_id WHERE q.id = ?", _id(body, "quote_id"), "견적")
+        tone = body.get("tone") or "normal"
+        if tone not in NEG_TONES:
+            raise BadRequest("톤 값이 올바르지 않습니다.")
+        args = ["counter", str(q["id"]), f"--tone={tone}", f"--lang={lang}"]
+        price = str(body.get("price") or "").strip()
+        if price:
+            try:
+                p = float(price)
+            except ValueError:
+                raise BadRequest("역제안 단가는 숫자로 입력해 주세요.")
+            if not 0 < p < 1_000_000:
+                raise BadRequest("역제안 단가가 올바르지 않습니다.")
+            args.append(f"--price={p:g}")
+        args += [f"--note={v}" for v in [_text(body, "note")] if v]
+        args += [f"--other={v}" for v in [_text(body, "other", 200)] if v]
+        return args, f"3번 역제안 초안({NEG_TONES[tone]}): {q['company']}"
+    if action == "gmail_sync":
+        return ["gmail-sync"], "3번 Gmail 확인 (발송 확인·새 답장)"
+    if action in ("mark", "followup", "analyze", "gmail_draft"):
+        m = _row(conn, MSG_NAME_SQL, _id(body, "message_id"), "메일")
+        if action == "gmail_draft":
+            if m["direction"] != "outbound":
+                raise BadRequest("보낼 메일 초안만 Gmail에 넣을 수 있습니다.")
+            return ["gmail-draft", str(m["id"])], f"3번 Gmail 임시보관함에 넣기 #{m['id']}: {m['company']}"
+        if action == "mark":
+            status = body.get("status")
+            if status not in NEG_MARKS or m["direction"] != "outbound":
+                raise BadRequest("바꿀 수 없는 상태입니다.")
+            return ["mark", str(m["id"]), status], f"3번 메일 #{m['id']} {NEG_MARKS[status]}: {m['company']}"
+        if action == "followup":
+            return ["followup", str(m["id"])], f"3번 후속 메일 초안: {m['company']}"
+        return ["analyze", str(m["id"])], f"3번 답장 다시 분석: {m['company']}"
+    raise BadRequest("알 수 없는 작업입니다.")
+
+
+def negotiation(conn, body):
+    try:
+        args, label = neg_args(conn, body)
+    except BadRequest as err:
+        return 400, {"error": str(err)}
+    with LOCK:     # 같은 대상에 같은 작업이 이미 돌고 있으면 거절 (다른 공급처 작업은 동시에 가능)
+        if any(j["label"] == label and j["status"] == "running" for j in JOBS.values()):
+            return 409, {"error": "같은 작업이 이미 실행 중입니다. 끝난 뒤 다시 눌러 주세요."}
+    return 200, job_view(start_job("neg", args, label))
+
+
+def refresh_reference_images(conn):
+    """참고 이미지는 1시간마다 또는 사진 없는 품목이 바뀌었을 때만 다시 검색 (네이버 호출 절약)."""
+    need = {r["id"] for r in conn.execute("SELECT id, image_url FROM products WHERE stage != 'dropped'")
+            if not db.resolve_image(r["image_url"])}
+    with LOCK:
+        if need == _REF_STATE["need"] and time.time() - _REF_STATE["at"] < REF_TTL:
+            return
+        _REF_STATE.update(need=need, at=time.time())
+    dashboard.load_reference_images(conn)
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "trade_hub"
+
+    def log_message(self, fmt, *args):      # 콘솔 조용히 (작업 로그는 data/logs)
+        pass
+
+    # --- 응답 도우미 ---
+    def _send(self, code, body, ctype="application/json; charset=utf-8"):
+        data = body if isinstance(body, bytes) else (
+            json.dumps(body, ensure_ascii=False).encode("utf-8") if ctype.startswith("application/json") else body.encode("utf-8"))
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _host_ok(self):
+        host = (self.headers.get("Host") or "").lower()
+        port = self.server.server_address[1]
+        return host in (f"127.0.0.1:{port}", f"localhost:{port}")
+
+    # --- GET ---
+    def do_GET(self):
+        if not self._host_ok():
+            return self._send(403, {"error": "허용되지 않은 Host"})
+        url = urlparse(self.path)
+        qs = parse_qs(url.query)
+        conn = db.connect()
+        try:
+            if url.path == "/":
+                with RENDER_LOCK:
+                    if getattr(self.server, "refs", True):
+                        refresh_reference_images(conn)
+                    page = dashboard.render(conn, server=True)
+                return self._send(200, page, "text/html; charset=utf-8")
+            if url.path == "/api/search":
+                return self._send(200, search(conn, (qs.get("q") or [""])[0]))
+            if url.path == "/api/jobs":
+                with LOCK:
+                    jobs = [job_view(j) for j in sorted(JOBS.values(), key=lambda j: j["started"], reverse=True)[:8]]
+                return self._send(200, jobs)
+            if url.path == "/file":
+                return self._file((qs.get("p") or [""])[0])
+            return self._send(404, {"error": "없는 주소"})
+        finally:
+            conn.close()
+
+    def _file(self, raw):
+        try:
+            path = Path(raw).resolve(strict=True)
+        except (OSError, RuntimeError):
+            return self._send(404, {"error": "파일 없음"})
+        if not path.is_file() or not any(path.is_relative_to(r) for r in allowed_roots()):
+            return self._send(403, {"error": "보여 줄 수 없는 파일"})
+        ctype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        if path.suffix.lower() in (".md", ".csv", ".json", ".txt", ".log"):
+            ctype = "text/plain"
+        if ctype.startswith("text/"):
+            ctype += "; charset=utf-8"
+        return self._send(200, path.read_bytes(), ctype)
+
+    # --- POST (실행) ---
+    def do_POST(self):
+        if not self._host_ok():
+            return self._send(403, {"error": "허용되지 않은 Host"})
+        if self.headers.get("X-Trade-Hub") != "1" or "application/json" not in (self.headers.get("Content-Type") or ""):
+            return self._send(403, {"error": "대시보드에서만 실행할 수 있습니다"})
+        try:
+            length = min(int(self.headers.get("Content-Length") or 0), 200_000)   # 답장 붙여넣기 (한글·중국어 UTF-8 포함)
+            body = json.loads(self.rfile.read(length) or b"{}")
+            if not isinstance(body, dict):
+                raise ValueError
+        except ValueError:
+            return self._send(400, {"error": "요청 형식 오류"})
+        route = {"/api/research": research, "/api/select": select,
+                 "/api/neg": negotiation}.get(urlparse(self.path).path)
+        if not route:
+            return self._send(404, {"error": "없는 주소"})
+        conn = db.connect()
+        try:
+            code, out = route(conn, body)
+        except RuntimeError as err:
+            code, out = 500, {"error": str(err)}
+        finally:
+            conn.close()
+        return self._send(code, out)
+
+
+def make_server(port=DEFAULT_PORT, refs=True):
+    srv = ThreadingHTTPServer((HOST, port), Handler)
+    srv.daemon_threads = True
+    srv.refs = refs
+    return srv
+
+
+def serve(port=DEFAULT_PORT, open_browser=True, refs=True):
+    srv = make_server(port, refs)
+    url = f"http://127.0.0.1:{srv.server_address[1]}/"
+    print(f"▶ 대시보드 서버: {url}  (이 PC에서만 접속 가능 · 끄려면 Ctrl+C)")
+    print(f"  DB: {db.default_path()}")
+    if open_browser:
+        import webbrowser
+        threading.Timer(0.5, webbrowser.open, args=(url,)).start()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        srv.server_close()
+        running = [j for j in JOBS.values() if j["status"] == "running"]
+        if running:
+            print(f"  · 실행 중이던 작업 {len(running)}개는 계속 돌고, 결과는 공용 DB에 기록됩니다 (로그: data/logs).")
+        print("서버를 껐습니다.")

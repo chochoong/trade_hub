@@ -173,3 +173,30 @@ def test_moved_on_hidden_when_nothing_moved(conn, tmp_path):
         db.upsert_product(conn, "후보")
     html = dashboard.build(tmp_path / "mv0.html", conn, refs=False).read_text(encoding="utf-8")
     assert "다음 단계로 넘어간 품목" not in html
+
+
+def test_suppliers_grouped_by_purchase_mode(conn, tmp_path, monkeypatch):
+    monkeypatch.setitem(dashboard.SERVER, "on", True)
+    with conn:
+        pid = db.upsert_product(conn, "AI안경", stage="sourcing")
+        db.link_supplier(conn, pid, db.upsert_supplier(conn, "Retail Shop", "China"), purchase_mode="retail", moq="1 piece")
+        db.link_supplier(conn, pid, db.upsert_supplier(conn, "Bulk Co", "China"), purchase_mode="small_batch", moq="50 pcs")
+        db.link_supplier(conn, pid, db.upsert_supplier(conn, "Old Co", "China"))                   # 예전 저장분
+        db.save_channels(conn, pid, None, [{"rank": 1, "key": "aliexpress", "site": "AliExpress", "total": 80}],
+                         purchase_mode="retail")
+    html = dashboard.render(conn, server=True)
+    card = html[html.index(f'id="prod-{pid}"'):]
+    card = card[:card.index('<div class="card"', 10)] if '<div class="card"' in card[10:] else card
+    i_r, i_s, i_o = card.index(">구매대행 <"), card.index(">소량 사입 <"), card.index(">구매 방식 미기록 <")
+    assert i_r < card.index("Retail Shop") < i_s < card.index("Bulk Co") < i_o < card.index("Old Co")
+    assert card.index("AliExpress") < i_s                                    # 구매대행 사이트 순위는 구매대행 묶음에
+    assert 'data-mode="retail"' in card and 'data-mode="small_batch"' in card
+    assert "구매대행용 다시 찾기" in card and "소량 사입용 다시 찾기" in card
+
+
+def test_candidate_has_two_mode_buttons(conn, monkeypatch):
+    monkeypatch.setitem(dashboard.SERVER, "on", True)
+    with conn:
+        db.upsert_product(conn, "후보")
+    html = dashboard.render(conn, server=True)
+    assert ">구매대행용 찾기</button>" in html and ">소량 사입용 찾기</button>" in html

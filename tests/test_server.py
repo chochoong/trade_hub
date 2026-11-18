@@ -1,0 +1,141 @@
+import json
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+
+import pytest
+
+from trade_hub import db, naver, server
+
+ORIGINAL_JOB_COMMAND = server.job_command   # srv 픽스처가 가짜로 바꾸기 전 원래 함수 (명령 조립 시험용)
+
+
+@pytest.fixture
+def srv(conn, monkeypatch, tmp_path):
+    """테스트용 서버 (임시 DB, 네이버 호출 없음, 에이전트 대신 가짜 명령)."""
+    monkeypatch.setattr(naver, "keys", lambda: None)
+    monkeypatch.setattr(server, "JOBS", {})
+
+    def fake_command(kind, arg):
+        if kind == "research":   # 1번 흉내: 품목을 만들고 RESULT_PRODUCT_ID 출력
+            code = ("from trade_hub import db; c = db.connect(); "
+                    f"pid = db.upsert_product(c, {arg!r}, origin='manual'); c.commit(); print('조사 끝'); "
+                    "print(f'RESULT_PRODUCT_ID={pid}')")
+        else:                    # 2번 흉내: 실패 없이 끝
+            code = "print('공급처 조사 끝')"
+        return [sys.executable, "-c", code], tmp_path, 1
+
+    monkeypatch.setattr(server, "job_command", fake_command)
+    monkeypatch.setattr(server, "agent_spec", lambda agent: (tmp_path, sys.executable, 1))
+    s = server.make_server(0, refs=False)
+    threading.Thread(target=s.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{s.server_address[1]}"
+    s.shutdown()
+    s.server_close()
+
+
+def call(url, body=None, headers=None):
+    h = {"Content-Type": "application/json", "X-Trade-Hub": "1"} if body is not None else {}
+    h.update(headers or {})
+    req = urllib.request.Request(url, data=json.dumps(body).encode() if body is not None else None, headers=h)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            raw = r.read()
+            return r.status, (json.loads(raw) if "json" in r.headers.get("Content-Type", "") else raw.decode())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read() or b"{}")
+
+
+def wait_job(base, job_id):
+    for _ in range(100):
+        jobs = {j["id"]: j for j in call(base + "/api/jobs")[1]}
+        if jobs[job_id]["status"] != "running":
+            return jobs[job_id]
+        time.sleep(0.1)
+    raise AssertionError("작업이 끝나지 않음")
+
+
+def test_page_and_search(srv, conn):
+    with conn:
+        db.upsert_product(conn, "무선 기계식 키보드", keywords_ko_json=db.dumps(["무선키보드"]))
+    code, html = call(srv + "/")
+    assert code == 200 and "SERVER_MODE = true" in html and 'id="q"' in html
+    code, hits = call(srv + "/api/search?q=" + urllib.request.quote("기계식 무선"))
+    assert code == 200 and [h["name"] for h in hits] == ["무선 기계식 키보드"]
+
+
+def test_post_needs_dashboard_header_and_host(srv):
+    assert call(srv + "/api/research", {"query": "x"}, {"X-Trade-Hub": "0"})[0] == 403    # 다른 사이트에서 온 요청
+    req = urllib.request.Request(srv + "/", headers={"Host": "evil.example:80"})          # DNS 리바인딩
+    with pytest.raises(urllib.error.HTTPError) as err:
+        urllib.request.urlopen(req, timeout=5)
+    assert err.value.code == 403
+    assert call(srv + "/api/research", {"query": "  "})[0] == 400
+    assert call(srv + "/api/research", {"query": "가" * 101})[0] == 400
+
+
+def test_research_runs_agent_and_reports_product(srv, conn):
+    code, job = call(srv + "/api/research", {"query": "캠핑 랜턴"})
+    assert code == 200 and job["status"] == "running"
+    done = wait_job(srv, job["id"])
+    assert done["status"] == "done" and done["product_id"]
+    assert conn.execute("SELECT name FROM products WHERE id = ?", (done["product_id"],)).fetchone()[0] == "캠핑 랜턴"
+
+
+def test_select_moves_stage_then_runs_sourcing(srv, conn):
+    with conn:
+        pid = db.upsert_product(conn, "키캡")
+        done_pid = db.upsert_product(conn, "발주한 품목", stage="ordered")
+    code, job = call(srv + "/api/select", {"product_id": pid})
+    assert code == 200 and job["product_id"] == pid
+    assert conn.execute("SELECT stage FROM products WHERE id = ?", (pid,)).fetchone()[0] == "sourcing"
+    assert wait_job(srv, job["id"])["status"] == "done"
+    assert call(srv + "/api/select", {"product_id": done_pid})[0] == 400       # 이미 뒤 단계
+    assert call(srv + "/api/select", {"product_id": 9999})[0] == 404
+
+
+def test_busy_agent_is_not_started_twice(srv, conn):
+    with conn:   # 슈퍼바이저 등 다른 곳에서 2번이 실행 중
+        conn.execute("INSERT INTO agent_runs (agent, status) VALUES ('sourcing', 'running')")
+        pid = db.upsert_product(conn, "키캡")
+    code, out = call(srv + "/api/select", {"product_id": pid})
+    assert code == 409 and "실행 중" in out["error"]
+    assert conn.execute("SELECT stage FROM products WHERE id = ?", (pid,)).fetchone()[0] == "candidate"
+
+
+def test_file_route_only_serves_allowed_folders(srv, tmp_path):
+    img = db.images_dir()
+    img.mkdir(parents=True, exist_ok=True)
+    (img / "1.png").write_bytes(b"png")
+    ok = call(srv + "/file?p=" + urllib.request.quote(str(img / "1.png")))
+    assert ok[0] == 200
+    assert call(srv + "/file?p=" + urllib.request.quote(str(db.default_path())))[0] == 403          # DB 파일
+    assert call(srv + "/file?p=" + urllib.request.quote(str(img / ".." / "trade.db")))[0] == 403   # 경로 우회
+
+
+def test_select_passes_purchase_mode(srv, conn, monkeypatch):
+    seen = []
+    real = server.job_command
+    monkeypatch.setattr(server, "job_command", lambda kind, arg: (seen.append((kind, arg)), real("research", "x"))[1])
+    with conn:
+        a = db.upsert_product(conn, "AI안경")
+        b = db.upsert_product(conn, "키캡")
+    code, job = call(srv + "/api/select", {"product_id": a, "mode": "retail"})
+    assert code == 200 and "구매대행용" in job["label"]
+    wait_job(srv, job["id"])
+    code, job = call(srv + "/api/select", {"product_id": b})                   # 방식이 없으면 소량 사입 (기존 동작)
+    assert code == 200 and "소량 사입용" in job["label"]
+    wait_job(srv, job["id"])
+    assert seen == [("sourcing", (a, "retail")), ("sourcing", (b, "small_batch"))]
+    assert call(srv + "/api/select", {"product_id": a, "mode": "oem; rm -rf"})[0] == 400   # 정해진 값만
+
+
+def test_job_command_builds_type_flag(monkeypatch, tmp_path):
+    real = ORIGINAL_JOB_COMMAND                                                 # 픽스처가 바꿔 끼우기 전 원래 함수
+    monkeypatch.setattr(server, "agent_spec", lambda agent: (tmp_path, "py", 60))
+    assert real("sourcing", (7, "retail"))[0] == ["py", "-m", "sourcing_agent", "from-db", "7", "--type", "retail"]
+    assert real("sourcing", 7)[0][-2:] == ["--type", "small_batch"]
+    with pytest.raises(ValueError):
+        real("sourcing", (7, "oem"))                                             # 대시보드에서는 retail·small_batch만

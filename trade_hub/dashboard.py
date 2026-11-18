@@ -14,7 +14,7 @@ from datetime import datetime
 from html import escape
 from pathlib import Path
 
-from trade_hub import db
+from trade_hub import buying, db
 
 STAGE_LABEL = {
     "candidate": "후보", "sourcing": "공급처 발굴", "negotiating": "협상", "sampling": "샘플",
@@ -148,9 +148,10 @@ def web_link(url, label):
     return f'<a href="{e(url)}" target="_blank" rel="noopener noreferrer">{e(label)}</a>'
 
 
-def channel_strip(conn, product_id):
-    """공급처 표 위에 '어느 사이트에서 살까' 순위: 사이트명(검색 링크) + 점수 + 소량 단가. 마우스를 올리면 장단점."""
-    chans = db.latest_channels(conn, product_id)
+def channel_strip(conn, product_id, purchase_mode=None):
+    """공급처 표 위에 '어느 사이트에서 살까' 순위: 사이트명(검색 링크) + 점수 + 소량 단가. 마우스를 올리면 장단점.
+    purchase_mode를 주면 그 구매 방식의 최신 평가만."""
+    chans = db.latest_channels(conn, product_id, purchase_mode)
     if not chans:
         return ""
     items = []
@@ -259,20 +260,26 @@ def candidate_rows(conn):
     return table(heads + (["작업"] if SERVER["on"] else []), out), len(rows)
 
 
+MODE_BUTTONS = (("retail", "구매대행"), ("small_batch", "소량 사입"))
+
+
 def actions(p):
-    """서버 모드 버튼: 후보 → [공급처 찾기](2번 단계로 넘기고 2번 실행), [다시 조사](1번 지정 품목 조사)."""
+    """서버 모드 버튼: 후보 → [구매대행용 찾기]·[소량 사입용 찾기](2번 단계로 넘기고 그 방식으로 2번 실행), [다시 조사]."""
     name = e(p["name"])
-    return (f'<div class="acts"><button type="button" class="btn primary" data-act="select" data-id="{p["id"]}" '
-            f'data-name="{name}">공급처 찾기</button>'
-            f'<button type="button" class="btn" data-act="research" data-q="{name}">다시 조사</button></div>')
+    btns = "".join(f'<button type="button" class="btn primary" data-act="select" data-id="{p["id"]}" data-name="{name}" '
+                   f'data-mode="{mode}" data-mode-label="{label}">{label}용 찾기</button>' for mode, label in MODE_BUTTONS)
+    return f'<div class="acts">{btns}<button type="button" class="btn" data-act="research" data-q="{name}">다시 조사</button></div>'
 
 
-def sourcing_button(p, has_suppliers):
+def sourcing_button(p, modes_found):
+    """공급처 발굴 카드: 구매 방식별 찾기. 이미 찾은 방식은 '다시 찾기'(보조 버튼), 아직이면 '찾기'(강조)."""
     if not SERVER["on"] or p["stage"] != "sourcing":
         return ""
-    label = "공급처 다시 찾기" if has_suppliers else "공급처 찾기"
-    return (f' <button type="button" class="btn{"" if has_suppliers else " primary"}" data-act="select" '
-            f'data-id="{p["id"]}" data-name="{e(p["name"])}">{label}</button>')
+    name = e(p["name"])
+    return " " + "".join(
+        f'<button type="button" class="btn{"" if mode in modes_found else " primary"}" data-act="select" data-id="{p["id"]}" '
+        f'data-name="{name}" data-mode="{mode}" data-mode-label="{label}">{label}용 {"다시 " if mode in modes_found else ""}찾기</button>'
+        for mode, label in MODE_BUTTONS)
 
 
 def product_index(conn):
@@ -290,6 +297,55 @@ def product_index(conn):
             .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"))
 
 
+# 공급처 목록을 나눌 구매 방식 (product_suppliers.purchase_mode). 대시보드 버튼은 retail·small_batch만 실행
+PURCHASE_GROUPS = [("retail", "구매대행"), ("small_batch", "소량 사입"), ("oem", "OEM"), (None, "구매 방식 미기록")]
+SUPPLIER_HEADS = ["", "공급처", "신뢰도·점수", "상태", "MOQ", "단가", "연락처", "위험 요소"]
+
+
+def sourcing_report(conn, product_id, mode):
+    """이 구매 방식으로 가장 최근에 돈 2번 실행의 리포트와 리포트 안 순위 {연결 id: 순위}.
+    mode가 None(예전 저장분)이면 구매 방식과 관계없이 가장 최근 실행."""
+    report = conn.execute("""
+        SELECT t.detail, t.run_id FROM tasks t JOIN agent_runs r ON r.id = t.run_id
+        WHERE t.product_id = ? AND r.agent = 'sourcing'
+          AND (? IS NULL OR json_extract(r.args_json, '$.sourcing_type') = ?)
+        ORDER BY t.id DESC LIMIT 1""", (product_id, mode, mode)).fetchone()
+    report_html = None
+    if report and report["detail"]:
+        path = Path(report["detail"])
+        html = path.with_name("report.html")      # 예전 실행은 report.md를 가리킴 → 같은 폴더의 HTML 우선
+        report_html = html if html.exists() else (path if path.exists() else None)
+    # 리포트 안 순위 = 그 실행에서 저장된 순서 → 이름을 누르면 리포트의 해당 업체가 펼쳐진 채로 열림
+    ranks = {}
+    if report_html and report_html.suffix == ".html":
+        ids = [r[0] for r in conn.execute("SELECT id FROM product_suppliers WHERE product_id = ? AND run_id = ? ORDER BY id",
+                                          (product_id, report["run_id"]))]
+        ranks = {lid: n for n, lid in enumerate(ids, 1)}
+    return report_html, ranks
+
+
+def supplier_row(s, report_html, ranks):
+    rank = ranks.get(s["link_id"])
+    name = (f'<a href="{e(file_href(report_html))}#s{rank}" target="_blank" title="리포트에서 상세 보기">{e(s["company"])}</a>'
+            if rank else e(s["company"]))
+    site = web_link(s["url"], "업체 페이지 ↗")
+    badge = f'<div class="small">{clip(s["platform_badge"], 40)}</div>' if s["platform_badge"] else ""
+    reason = (s["trust_reason"] or "").split(" — ", 1)
+    reason = reason[1] if len(reason) == 2 else (s["trust_reason"] if s["ps_score"] is not None else "")
+    contact = "".join(f'<div>{x}</div>' for x in (e(s["contact_email"]), clip(s["contact_other"], 40)) if x)
+    return [
+        '<span class="pick">추천</span>' if s["is_top_pick"] else "",
+        f'<div class="pcell">{supplier_photo(s["sup_image"])}<div>{name}<div class="muted small">{e(s["country"])} · {e(s["type"])}'
+        f'{" · " + num(s["years_in_business"], "{:g}년") if s["years_in_business"] else ""}'
+        f'{" · " + site if site else ""}</div>{badge}</div></div>',
+        f'<span class="trust t{e(s["trust"])}">{e(s["trust"] or "–")}</span> <span class="small">{e(supplier_score(s))}</span>'
+        + (f'<div class="small">{clip(reason, 40)}</div>' if reason else ""),
+        e(s["status"]), f'{moq_badge(s)}<div>{clip(s["moq"], 30)}</div>', clip(s["price_note"] or num(s["unit_price_usd"], "${:g}"), 30),
+        contact or '<span class="muted">–</span>',
+        clip(s["red_flags"], 50),
+    ]
+
+
 def products_in_progress(conn):
     prods = conn.execute(f"""SELECT * FROM products WHERE stage NOT IN ('candidate', 'dropped')
                              ORDER BY {db.stage_order_sql()} DESC, id""").fetchall()
@@ -302,51 +358,30 @@ def products_in_progress(conn):
                    ps.score AS ps_score, ps.grade AS ps_grade, ps.purchase_mode AS ps_mode, ps.max_order_qty AS ps_max_qty
             FROM product_suppliers ps JOIN suppliers s ON s.id = ps.supplier_id
             WHERE ps.product_id = ? ORDER BY ps.is_top_pick DESC, ps.id""", (p["id"],)).fetchall()
-        report = conn.execute("""SELECT detail, run_id FROM tasks WHERE product_id = ? AND run_id IN
-                                 (SELECT id FROM agent_runs WHERE agent = 'sourcing') ORDER BY id DESC LIMIT 1""",
-                              (p["id"],)).fetchone()
-        report_html = None
-        if report and report["detail"]:
-            path = Path(report["detail"])
-            html = path.with_name("report.html")      # 예전 실행은 report.md를 가리킴 → 같은 폴더의 HTML 우선
-            report_html = html if html.exists() else (path if path.exists() else None)
-        # 리포트 안 순위 = 그 실행에서 저장된 순서 → 이름을 누르면 리포트의 해당 업체가 펼쳐진 채로 열림
-        ranks = {}
-        if report_html and report_html.suffix == ".html":
-            ids = [r[0] for r in conn.execute("SELECT id FROM product_suppliers WHERE product_id = ? AND run_id = ? ORDER BY id",
-                                              (p["id"], report["run_id"]))]
-            ranks = {lid: n for n, lid in enumerate(ids, 1)}
-        rows = []
+        groups = {}                               # 구매 방식별로 나눠 보여 줌 (retail = 구매대행, small_batch = 소량 사입)
         for s in sups:
-            rank = ranks.get(s["link_id"])
-            name = (f'<a href="{e(file_href(report_html))}#s{rank}" target="_blank" title="리포트에서 상세 보기">{e(s["company"])}</a>'
-                    if rank else e(s["company"]))
-            site = web_link(s["url"], "업체 페이지 ↗")
-            badge = f'<div class="small">{clip(s["platform_badge"], 40)}</div>' if s["platform_badge"] else ""
-            reason = (s["trust_reason"] or "").split(" — ", 1)
-            reason = reason[1] if len(reason) == 2 else (s["trust_reason"] if s["ps_score"] is not None else "")
-            contact = "".join(f'<div>{x}</div>' for x in (e(s["contact_email"]), clip(s["contact_other"], 40)) if x)
-            rows.append([
-                '<span class="pick">추천</span>' if s["is_top_pick"] else "",
-                f'<div class="pcell">{supplier_photo(s["sup_image"])}<div>{name}<div class="muted small">{e(s["country"])} · {e(s["type"])}'
-                f'{" · " + num(s["years_in_business"], "{:g}년") if s["years_in_business"] else ""}'
-                f'{" · " + site if site else ""}</div>{badge}</div></div>',
-                f'<span class="trust t{e(s["trust"])}">{e(s["trust"] or "–")}</span> <span class="small">{e(supplier_score(s))}</span>'
-                + (f'<div class="small">{clip(reason, 40)}</div>' if reason else ""),
-                e(s["status"]), f'{moq_badge(s)}<div>{clip(s["moq"], 30)}</div>', clip(s["price_note"] or num(s["unit_price_usd"], "${:g}"), 30),
-                contact or '<span class="muted">–</span>',
-                clip(s["red_flags"], 50),
-            ])
+            groups.setdefault(s["ps_mode"], []).append(s)
+        blocks = []
+        for mode, label in PURCHASE_GROUPS:
+            if mode not in groups:
+                continue
+            report_html, ranks = sourcing_report(conn, p["id"], mode)
+            rep = link(report_html, "리포트") if report_html else ""
+            rows = [supplier_row(s, report_html, ranks) for s in groups[mode]]
+            blocks.append(f"""<div class="ps-group"><h3 class="ps-mode">{e(label)} <span class="muted small">{len(rows)}곳</span>
+    <span class="small">{rep}</span></h3>
+  {channel_strip(conn, p["id"], mode)}
+  {table(SUPPLIER_HEADS, rows, "tight")}</div>""")
+        if not blocks:                            # 공급처가 아직 없음 → 사이트 순위만 (있으면)
+            blocks.append(channel_strip(conn, p["id"]) + table(SUPPLIER_HEADS, [], "tight"))
         last = conn.execute("SELECT note, at FROM product_events WHERE product_id = ? ORDER BY id DESC LIMIT 1",
                             (p["id"],)).fetchone()
-        rep = link(report_html, "공급처 리포트") if report_html else ""
         cards.append(f"""<div class="card" id="prod-{p["id"]}">
   <div class="card-head"><span class="badge">{e(STAGE_LABEL.get(p["stage"], p["stage"]))}</span>
     {photo(p, "big")}<div><b>#{p["id"]} {e(p["name"])}</b> <span class="muted small">{e(last["note"] if last else "")} · {e(last["at"][:16] if last else "")}</span>
     <div class="small">{search_links(p)}</div></div>
-    <span class="right">{rep}{sourcing_button(p, bool(sups))}</span></div>
-  {channel_strip(conn, p["id"])}
-  {table(["", "공급처", "신뢰도·점수", "상태", "MOQ", "단가", "연락처", "위험 요소"], rows, "tight")}
+    <span class="right">{sourcing_button(p, set(groups))}</span></div>
+  {"".join(blocks)}
 </div>""")
     return "".join(cards), len(prods)
 
@@ -417,8 +452,13 @@ background:var(--card);border:1px solid var(--line);border-radius:10px;padding:7
 .chips{display:flex;flex-wrap:wrap;gap:6px}.chip{border:1px solid var(--line);border-radius:999px;padding:3px 12px;color:var(--muted)}
 .chip.on{border-color:var(--accent);color:var(--fg);background:var(--accent-soft)}.chip b{color:var(--accent)}
 .search{position:relative;flex:1 1 320px;max-width:520px}
-.search input{width:100%;font:inherit;padding:7px 12px;border:1px solid var(--line);border-radius:8px;background:var(--card);color:var(--fg)}
-.search input:focus{outline:2px solid var(--accent);border-color:transparent}
+.sbox{display:flex}
+.search input{flex:1;min-width:0;font:inherit;padding:7px 12px;border:1px solid var(--line);border-right:0;
+border-radius:8px 0 0 8px;background:var(--card);color:var(--fg)}
+.search input:focus{outline:2px solid var(--accent);outline-offset:-2px}
+.sgo{flex:none;display:flex;align-items:center;justify-content:center;width:42px;border:1px solid var(--accent);
+border-radius:0 8px 8px 0;background:var(--accent);color:#fff;cursor:pointer}
+.sgo:hover{filter:brightness(1.1)}.sgo:focus-visible{outline:2px solid var(--fg);outline-offset:2px}
 .results{position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:10;background:var(--card);border:1px solid var(--line);
 border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.15);overflow:hidden}
 .hit{display:block;width:100%;text-align:left;padding:8px 12px;border:0;border-bottom:1px solid var(--line);background:none;
@@ -431,7 +471,10 @@ color:var(--fg);cursor:pointer;white-space:nowrap}.btn:hover{border-color:var(--
 .flash,.flash td{animation:flash 2.5s ease-out}
 .jobs{position:fixed;right:16px;bottom:16px;z-index:20;width:min(460px,calc(100vw - 32px));max-height:60vh;overflow:auto;
 background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.2);padding:8px 12px}
-.job{padding:6px 0;border-bottom:1px solid var(--line)}.job:last-child{border-bottom:0}
+.job{position:relative;padding:6px 26px 6px 0;border-bottom:1px solid var(--line)}.job:last-child{border-bottom:0}
+.jobs .x{border:0;background:none;color:var(--muted);cursor:pointer;font:inherit;font-size:12px;padding:2px 6px;border-radius:6px}
+.jobs .x:hover{background:var(--accent-soft);color:var(--fg)}.job>.x{position:absolute;top:4px;right:0}
+.jobs-head{display:flex;justify-content:space-between;align-items:center;padding-bottom:4px;border-bottom:1px solid var(--line)}
 .job pre{margin:4px 0 0;font-size:11px;white-space:pre-wrap;color:var(--muted);max-height:96px;overflow:auto}
 .job.failed b{color:var(--bad)}.job.done b{color:var(--ok)}
 .intro{display:flex;gap:16px;align-items:flex-start}.intro h2{margin-bottom:6px}.intro ul{margin:0 0 6px;padding-left:18px}
@@ -458,6 +501,7 @@ table.tight td{padding:6px 8px}
 .ch{display:flex;align-items:baseline;gap:6px;border:1px solid var(--line);border-radius:8px;padding:3px 10px;cursor:default}
 .ch.top{border-color:var(--accent);background:var(--accent-soft)}.ch.unassessed{opacity:.6}
 .ch-rank{font-size:11px;color:var(--muted)}.ch-score{color:var(--accent)}
+.ps-group+.ps-group{margin-top:14px}.ps-mode{font-size:14px;margin:10px 0 4px;display:flex;gap:8px;align-items:baseline}
 .nolink{text-decoration:underline dotted;cursor:help}
 .card{border:1px solid var(--line);border-radius:10px;padding:12px;margin:10px 0}
 .card-head{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;margin-bottom:8px}.right{margin-left:auto}
@@ -473,6 +517,25 @@ font-style:normal;text-align:center;color:#fff;background:rgba(0,0,0,.55)}
 details summary{cursor:pointer}.long{white-space:pre-wrap;margin-top:4px;max-width:520px}
 .brief{white-space:pre-wrap}.alerts li.warn{color:var(--warn)}.alerts li.critical,.alerts li.error{color:var(--bad)}
 a{color:var(--accent)}code{background:var(--accent-soft);padding:1px 5px;border-radius:4px}
+.neg{border-top:1px solid var(--line);padding:10px 0 6px}.neg:first-of-type{border-top:0}
+.neg-head{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;margin-bottom:6px}
+.acts.row{flex-direction:row;flex-wrap:wrap;align-items:flex-start;gap:6px}
+.msg{border-left:3px solid var(--line);padding:4px 10px;margin:6px 0 6px 4px}
+.msg.out{border-left-color:var(--accent)}.msg.in{border-left-color:var(--ok)}
+.msg.discarded{opacity:.5}.msg.draft{background:var(--accent-soft)}
+.msg .acts{margin-top:4px}
+.mst{font-weight:600}.mst.draft,.mst.approved{color:var(--warn)}.mst.sent{color:var(--accent)}.mst.received{color:var(--ok)}
+.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:8px;margin-top:4px}
+.cols pre{margin:0;white-space:pre-wrap;font:inherit;font-size:13px;background:var(--bg);border:1px solid var(--line);
+border-radius:8px;padding:8px;max-height:320px;overflow:auto}
+form.negf.inline{display:inline-flex;flex-wrap:wrap;gap:6px}
+form.negf.stack{display:flex;flex-direction:column;gap:6px;margin-top:6px;padding:10px;min-width:min(420px,80vw);
+border:1px solid var(--line);border-radius:10px;background:var(--card)}
+form.negf input:not([type=hidden]),form.negf select,form.negf textarea{font:inherit;font-size:13px;padding:5px 8px;
+border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
+form.negf textarea{min-height:120px;resize:vertical}
+.frow{display:flex;flex-wrap:wrap;gap:8px}.frow label{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px}
+summary.btn{list-style:none;display:inline-block}summary.btn::-webkit-details-marker{display:none}
 """
 
 
@@ -534,6 +597,8 @@ def nav(conn):
                      f'<span class="no">{no}</span><b>{e(name)}</b>'
                      f'<span class="small"><i class="dot"></i>{state[1]}{when}</span>'
                      f'<span class="metric">{"–" if val is None else val}<small> {e(unit)}</small></span></a>')
+        if agent == "sourcing":                 # 2번 옆 갈래: 구매대행 (buyagent 폴더를 읽기만)
+            items.append(buying.nav_item())
     return '<nav class="pipe-nav">' + '<span class="arrow">›</span>'.join(items) + "</nav>"
 
 
@@ -605,6 +670,201 @@ def moved_on(conn):
                    f"{len(rows)}개 · 후보 목록에서 빠진 품목 · 이름을 누르면 지금 있는 화면으로 이동")
 
 
+# --- 3번 협상 (negotiation_agent) -----------------------------------------------------
+MSG_STATUS = {"draft": "초안", "approved": "검토 완료", "sent": "보냄", "discarded": "버림", "received": "받음"}
+MSG_KIND = {"rfq": "견적 요청", "follow_up": "후속 메일", "negotiation": "역제안", "sample": "샘플 요청",
+            "order": "발주", "other": "메일"}
+PS_STATUS = {"candidate": "연락 전", "contacted": "연락함", "quoted": "견적 받음", "sampling": "샘플",
+             "selected": "선정", "rejected": "제외"}
+LANG_OPTS = '<option value="en">영어</option><option value="zh">중국어</option>'
+SENT_Q = "이 메일을 직접 보냈나요? (에이전트는 보내지 않습니다)"
+MARK_BUTTONS = {   # 현재 상태 → (바꿀 상태, 버튼, 확인 문구)
+    "draft": [("approved", "검토 완료", ""), ("sent", "발송 완료로 표시", SENT_Q), ("discarded", "버림", "이 초안을 버릴까요?")],
+    "approved": [("sent", "발송 완료로 표시", SENT_Q), ("draft", "초안으로", ""), ("discarded", "버림", "이 초안을 버릴까요?")],
+}
+COST = "3번 에이전트를 실행할까요? (수십 초 · API 비용)"
+
+
+def neg_form(action, hidden, inner, confirm=COST, cls=""):
+    """서버 모드 폼 → JS가 /api/neg 로 보낸다 (action·hidden 값 + 입력칸)."""
+    fields = "".join(f'<input type="hidden" name="{k}" value="{e(v)}">' for k, v in {"action": action, **hidden}.items())
+    return f'<form class="negf {cls}" data-confirm="{e(confirm)}">{fields}{inner}</form>'
+
+
+def mark_form(m):
+    btns = "".join(f'<button class="btn{" primary" if s == "sent" else ""}" name="status" value="{s}" '
+                   f'data-confirm="{e(c)}">{label}</button>' for s, label, c in MARK_BUTTONS.get(m["status"], []))
+    return neg_form("mark", {"message_id": m["id"]}, btns, confirm="", cls="inline") if btns else ""
+
+
+def _analysis(m):
+    if not m["analysis_json"]:
+        return {}
+    try:
+        v = json.loads(m["analysis_json"])
+    except ValueError:
+        return {}
+    return v if isinstance(v, dict) else {}
+
+
+def message_item(m, waiting=None, can_follow=False):
+    out = m["direction"] == "outbound"
+    a = _analysis(m)
+    when = (m["sent_at"] or m["created_at"] or "")[:16].replace("T", " ")
+    head = (f'{"📤" if out else "📥"} <b>#{m["id"]}</b> {e(MSG_KIND.get(m["kind"], m["kind"]) if out else "받은 답장")} · '
+            f'<span class="mst {e(m["status"])}">{e(MSG_STATUS.get(m["status"], m["status"]))}</span> · '
+            f'<span class="muted small">{e(when)}</span> {e(m["subject"])}')
+    copy_text = f'{m["subject"]}\n\n{m["body"]}' if out and m["subject"] else m["body"]
+    is_draft = out and m["status"] in ("draft", "approved")      # 검토할 초안은 펼쳐서 바로 보이게
+    texts = (f'<details{" open" if is_draft else ""}><summary class="small">원문 · 한국어{" 번역" if m["translation"] else ""}</summary>'
+             f'<div class="cols"><pre id="msg-{m["id"]}">{e(copy_text)}</pre>'
+             f'<pre>{e(m["translation"] or "(번역 없음)")}</pre></div></details>')
+    extra = []
+    if out and a.get("strategy_ko"):
+        meta = ""
+        if a.get("tone"):
+            meta = f' <span class="muted">({e(a["tone"])}' + (f' · ${a["counter_price_usd"]:g}' if a.get("counter_price_usd") else "") + ")</span>"
+        extra.append(f'<div class="small">💡 {e(a["strategy_ko"])}{meta}</div>')
+    if not out:
+        if a.get("error"):
+            extra.append(f'<div class="small bad">분석 실패: {clip(a["error"], 80)}</div>')
+        elif not a:
+            extra.append('<div class="small warn">분석 대기 (슈퍼바이저가 자동 처리)</div>')
+        if a.get("summary_ko"):
+            extra.append(f'<div class="small">{e(a["summary_ko"])}</div>')
+        if a.get("open_questions_ko"):
+            extra.append('<div class="small muted">확인할 점: ' + " · ".join(e(q) for q in a["open_questions_ko"]) + "</div>")
+    if waiting is not None:
+        extra.append(f'<div class="small warn">⏳ {waiting}일째 답 없음</div>')
+    acts = []
+    if SERVER["on"]:
+        if out and m["status"] in ("draft", "approved"):
+            acts.append(f'<button type="button" class="btn" data-copy="msg-{m["id"]}">원문 복사</button>' + mark_form(m))
+            if m["external_draft_id"]:       # Gmail 임시보관함에 있음 → Gmail에서 보내면 동기화 때 '보냄'으로 바뀜
+                acts.append('<span class="small ok">📨 Gmail 임시보관함에 있음 — Gmail에서 직접 보내세요</span>')
+            else:
+                acts.append(neg_form("gmail_draft", {"message_id": m["id"]},
+                                     '<button class="btn">Gmail 임시보관함에 넣기</button>',
+                                     confirm="이 초안을 Gmail 임시보관함에 넣을까요? (보내지는 않습니다)", cls="inline"))
+        if can_follow:
+            target = m["reply_to_id"] if m["kind"] == "follow_up" and m["reply_to_id"] else m["id"]
+            acts.append(neg_form("followup", {"message_id": target}, '<button class="btn">후속 메일 초안</button>', cls="inline"))
+        if not out and a.get("error"):
+            acts.append(neg_form("analyze", {"message_id": m["id"]}, '<button class="btn">다시 분석</button>', cls="inline"))
+    elif out and m["status"] in ("draft", "approved"):
+        acts.append(f'<code class="small">python -m negotiation_agent mark {m["id"]} sent</code>')
+    return (f'<div class="msg {"out" if out else "in"} {e(m["status"])}"><div>{head}</div>{texts}{"".join(extra)}'
+            + (f'<div class="acts row">{"".join(acts)}</div>' if acts else "") + "</div>")
+
+
+COUNTER_FIELDS = (
+    '<div class="frow"><label>톤 <select name="tone"><option value="soft">부드럽게</option>'
+    '<option value="normal" selected>보통</option><option value="firm">강하게</option></select></label>'
+    '<label>단가 $ <input name="price" inputmode="decimal" size="6" placeholder="목표가"></label>'
+    f'<label>언어 <select name="lang">{LANG_OPTS}</select></label></div>'
+    '<input name="other" maxlength="200" placeholder="타 업체 비교 언급 (선택, 사실만)">'
+    '<input name="note" maxlength="500" placeholder="추가 요청 (예: MOQ 200으로, 샘플비 환급)">'
+    '<button class="btn primary">역제안 초안 만들기</button>'
+    '<div class="small muted">단가를 비우면 3번의 내부 목표가를 씁니다. 상한가는 초안·공용 DB에 들어가지 않습니다.</div>')
+
+
+def quote_rows(conn, ps_id):
+    rows = conn.execute("SELECT * FROM quotes WHERE product_supplier_id = ? ORDER BY id DESC", (ps_id,)).fetchall()
+    out = []
+    for q in rows:
+        try:
+            tiers = json.loads(q["price_tiers_json"]) if q["price_tiers_json"] else []
+        except ValueError:
+            tiers = []
+        tiers = tiers if isinstance(tiers, list) else []
+        tier_txt = " · ".join(f'{t.get("qty")}개 ${t["usd"]:g}' for t in tiers
+                              if isinstance(t, dict) and isinstance(t.get("usd"), (int, float)))
+        row = [f'#{q["id"]}', f'<b>${q["unit_price_usd"]:g}</b>', num(q["min_qty"], "{:,}개"), e(tier_txt) or "–",
+               e(q["incoterm"] or "–"), num(q["lead_time_days"], "{}일"), clip(q["payment_terms"], 30),
+               num(q["sample_cost_usd"], "${:g}"), e((q["created_at"] or "")[:10])]
+        if SERVER["on"]:
+            row.append('<details><summary class="btn">역제안</summary>'
+                       + neg_form("counter", {"quote_id": q["id"]}, COUNTER_FIELDS, cls="stack") + "</details>")
+        out.append(row)
+    if not out:
+        return ""
+    heads = ["견적", "단가", "MOQ", "가격 구간", "조건", "납기", "결제", "샘플", "받은 날"] + (["작업"] if SERVER["on"] else [])
+    return table(heads, out, "tight")
+
+
+def supplier_thread(conn, s):
+    msgs = conn.execute("SELECT * FROM messages WHERE product_supplier_id = ? ORDER BY id", (s["link_id"],)).fetchall()
+    # 마지막으로 보낸 메일 이후 답장이 없으면 'N일째 답 없음' + (대기 중인 후속 초안이 없으면) 후속 메일 버튼
+    sent = [m for m in msgs if m["direction"] == "outbound" and m["status"] == "sent" and m["sent_at"]]
+    last = sent[-1] if sent else None
+    waiting = None
+    if last and not any(m["direction"] == "inbound" and (m["sent_at"] or m["created_at"]) >= last["sent_at"] for m in msgs):
+        waiting = (datetime.now() - datetime.fromisoformat(last["sent_at"])).days
+    pending_fu = any(m["kind"] == "follow_up" and m["status"] in ("draft", "approved") for m in msgs)
+    items = "".join(message_item(m, waiting if m is last else None,
+                                 can_follow=(m is last and waiting is not None and not pending_fu)) for m in msgs)
+    has_rfq = any(m["kind"] == "rfq" and m["status"] != "discarded" for m in msgs)
+    forms = ""
+    if SERVER["on"] and not has_rfq:
+        qty = f'{s["ps_max_qty"]} pcs' if s["ps_max_qty"] else "예: 50 pcs"
+        forms += ('<details><summary class="btn primary">견적 요청 초안</summary>' + neg_form("rfq", {"ps_id": s["link_id"]},
+                  f'<div class="frow"><label>수량 <input name="qty" maxlength="60" size="12" placeholder="{e(qty)}"></label>'
+                  '<label>조건 <select name="incoterm"><option value="">미지정</option><option>FOB</option>'
+                  '<option>EXW</option><option>CIF</option><option>DDP</option></select></label>'
+                  f'<label>언어 <select name="lang">{LANG_OPTS}</select></label></div>'
+                  '<input name="note" maxlength="500" placeholder="추가 요청 (예: 로고 인쇄 가능 여부)">'
+                  '<button class="btn primary">초안 만들기</button>'
+                  '<div class="small muted">2번이 정리한 첫 문의 질문·확인 못 한 항목·필요 인증을 함께 묻습니다.</div>',
+                  cls="stack") + "</details>")
+    if SERVER["on"] and msgs:
+        forms += ('<details><summary class="btn">받은 답장 붙여넣기</summary>' + neg_form("reply", {"ps_id": s["link_id"]},
+                  '<textarea name="text" rows="7" maxlength="20000" required '
+                  'placeholder="공급처가 보낸 메일·채팅 내용을 그대로 붙여넣기"></textarea>'
+                  '<button class="btn primary">저장하고 분석</button>'
+                  '<div class="small muted">요약·번역하고, 가격이 있으면 견적표에 넣습니다.</div>',
+                  confirm="답장을 저장하고 3번 에이전트로 분석할까요? (수십 초 · API 비용)", cls="stack") + "</details>")
+    contact = " · ".join(x for x in (e(s["contact_email"]), e(s["contact_other"])) if x)
+    return f"""<div class="neg" id="ps-{s["link_id"]}">
+  <div class="neg-head">{'<span class="pick">추천</span> ' if s["is_top_pick"] else ""}<b>{e(s["company"])}</b>
+    <span class="muted small">{e(s["country"])} · 연결 #{s["link_id"]}</span>
+    <span class="trust t{e(s["trust"])}">{e(s["trust"] or "")}</span>
+    <span class="badge">{e(PS_STATUS.get(s["status"], s["status"]))}</span>
+    <span class="small">{contact or '<span class="muted">연락처 없음</span>'}</span>
+    <span class="right acts row">{forms}</span></div>
+  {items}{quote_rows(conn, s["link_id"])}
+</div>"""
+
+
+def negotiation_view(conn):
+    prods = conn.execute(f"""SELECT * FROM products WHERE stage NOT IN ('candidate', 'closed', 'dropped')
+                             AND EXISTS (SELECT 1 FROM product_suppliers ps WHERE ps.product_id = products.id)
+                             ORDER BY {db.stage_order_sql()} DESC, id""").fetchall()
+    if not prods:
+        return '<p class="empty">공급처가 정해진 진행 품목이 없습니다 — 2번이 공급처를 찾으면 여기서 견적 요청을 시작합니다.</p>', 0
+    cards = []
+    for p in prods:
+        sups = conn.execute("""
+            SELECT s.*, ps.id AS link_id, ps.status, ps.is_top_pick, ps.max_order_qty AS ps_max_qty,
+                   (SELECT COUNT(*) FROM messages m WHERE m.product_supplier_id = ps.id) AS n_msgs
+            FROM product_suppliers ps JOIN suppliers s ON s.id = ps.supplier_id WHERE ps.product_id = ?
+            ORDER BY n_msgs > 0 DESC, ps.is_top_pick DESC, ps.id""", (p["id"],)).fetchall()
+        main = [s for s in sups if s["n_msgs"] or s["is_top_pick"]]
+        rest = [s for s in sups if not (s["n_msgs"] or s["is_top_pick"])]
+        body = "".join(supplier_thread(conn, s) for s in main)
+        if rest:
+            body += (f'<details class="more"><summary class="small">다른 후보 공급처 {len(rest)}곳</summary>'
+                     + "".join(supplier_thread(conn, s) for s in rest) + "</details>")
+        cards.append(f'<div class="card"><div class="card-head"><span class="badge">{e(STAGE_LABEL.get(p["stage"], p["stage"]))}</span>'
+                     f'{photo(p)}<div><b>#{p["id"]} {e(p["name"])}</b> <span class="muted small">{e(p["search_keyword_en"])}</span>'
+                     f'</div></div>{body}</div>')
+    if SERVER["on"]:       # Gmail: 사람이 보낸 메일을 '보냄'으로, 새 답장은 가져와 분석 (슈퍼바이저도 2시간마다 함)
+        cards.insert(0, '<div class="row">' + neg_form(
+            "gmail_sync", {}, '<button class="btn">Gmail 확인 (발송 확인 · 새 답장 가져오기)</button>',
+            confirm="Gmail에서 보낸 메일·새 답장을 확인할까요? (새 답장은 분석 · API 비용)", cls="inline")
+            + '<span class="small muted">처음 한 번 터미널에서 <code>python -m negotiation_agent gmail-login</code></span></div>')
+    return "".join(cards), len(prods)
+
+
 def agent_body(conn, agent):
     """에이전트별 페이지의 본문 섹션들."""
     if agent == "discover":
@@ -616,8 +876,10 @@ def agent_body(conn, agent):
         return [section("품목별 공급처", html, f"{n}개 품목 · 업체 이름을 누르면 리포트 상세"),
                 section("공급처 검토 할 일", tasks_of(conn, ["decision"]))]
     if agent == "negotiation":
-        return [section("메일·메시지 (초안·수신)", generic_rows(conn, "messages")),
-                section("견적", generic_rows(conn, "quotes")),
+        html, n = negotiation_view(conn)
+        hint = ("메일은 직접 보내고 '발송 완료로 표시' · 답 없으면 3일 뒤 후속 메일 초안 자동" if SERVER["on"]
+                else "버튼은 <code>trade_hub serve</code>에서 · 터미널: <code>python -m negotiation_agent status</code>")
+        return [section("공급처별 메일·견적", html, f"{n}개 품목 · {hint}"),
                 section("발송·견적 검토 할 일", tasks_of(conn, ["send_message", "review_quote"]))]
     if agent == "documents":
         return [section("서류 할 일", tasks_of(conn, ["document"]))]
@@ -677,6 +939,13 @@ box.addEventListener("keydown", function (ev) {
   if (ev.key === "Enter") { var first = list.querySelector("a.hit, #q-new"); if (first) first.click(); }
   if (ev.key === "Escape") { list.hidden = true; box.blur(); }
 });
+document.getElementById("q-go").addEventListener("click", function () {   // 돋보기: 검색 실행
+  if (!box.value.trim()) { box.focus(); return; }
+  renderResults();
+  var hits = list.querySelectorAll("a.hit");
+  if (hits.length === 1) { hits[0].click(); return; }                     // 딱 하나면 바로 그 품목으로
+  box.focus();
+});
 document.addEventListener("click", function (ev) { if (!ev.target.closest(".search")) list.hidden = true; });
 list.addEventListener("click", function (ev) { if (ev.target.closest("a.hit")) list.hidden = true; });
 
@@ -687,6 +956,12 @@ function show() {
     target = document.getElementById("prod-" + m[1]);
     var page = target && target.closest(".page");
     id = page ? page.id.slice(2) : "home";
+  } else if (/^ps-\\d+$/.test(id)) {          // #ps-12 → 3번 페이지의 그 공급처 (접힌 '다른 후보' 안이면 펼침)
+    target = document.getElementById(id);
+    var pg = target && target.closest(".page");
+    var fold = target && target.closest("details.more");
+    if (fold) fold.open = true;
+    id = pg ? pg.id.slice(2) : "home";
   }
   var found = false;
   document.querySelectorAll(".page").forEach(function (p) { var on = p.id === "p-" + id; p.hidden = !on; found = found || on; });
@@ -700,11 +975,25 @@ function show() {
 }
 window.addEventListener("hashchange", show);
 show();
+document.addEventListener("click", function (ev) {   // 초안 원문 복사 → 메일·알리바바 등에 붙여넣어 직접 발송
+  var b = ev.target.closest("button[data-copy]");
+  if (!b) return;
+  var src = document.getElementById(b.dataset.copy);
+  if (!src || !navigator.clipboard) return;
+  navigator.clipboard.writeText(src.textContent).then(function () {
+    var t = b.textContent; b.textContent = "복사됨 ✓"; setTimeout(function () { b.textContent = t; }, 1500);
+  });
+});
 """
 
 SERVER_JS = """
 window.SERVER_MODE = true;
-var panel = document.getElementById("jobs"), mine = {};
+var panel = document.getElementById("jobs"), mine = {}, lastJobs = [];
+var closedJobs = {};                          // 닫은 알림 (작업 id) — 새로고침해도 유지
+                                              // ※ 이름을 closed로 하면 브라우저 내장 window.closed(읽기 전용, 항상 false)와 겹쳐 저장이 안 됨
+try { closedJobs = JSON.parse(localStorage.getItem("tradeHubClosedJobs") || "{}"); } catch (err) { closedJobs = {}; }
+if (!closedJobs || typeof closedJobs !== "object" || Array.isArray(closedJobs)) closedJobs = {};   // 예전 버그로 저장된 "false" 등은 버림
+function saveClosed() { try { localStorage.setItem("tradeHubClosedJobs", JSON.stringify(closedJobs)); } catch (err) {} }
 function api(path, body) {
   return fetch(path, {method: body ? "POST" : "GET",
     headers: body ? {"Content-Type": "application/json", "X-Trade-Hub": "1"} : {},
@@ -719,28 +1008,47 @@ document.addEventListener("click", function (ev) {
   var b = ev.target.closest("button[data-act]");
   if (!b) return;
   if (b.dataset.act === "select") {
-    if (!confirm("#" + b.dataset.id + " " + b.dataset.name + "\\n공급처 발굴 단계로 넘기고 2번 에이전트를 실행할까요? (5~10분 · API 비용)")) return;
-    startJob("/api/select", {product_id: Number(b.dataset.id)});
+    var mode = b.dataset.mode || "small_batch", ml = b.dataset.modeLabel || "소량 사입";
+    if (!confirm("#" + b.dataset.id + " " + b.dataset.name + "\\n[" + ml + "] 방식으로 공급처를 찾을까요? 공급처 발굴 단계로 넘기고 2번 에이전트를 실행합니다. (5~10분 · API 비용)")) return;
+    startJob("/api/select", {product_id: Number(b.dataset.id), mode: mode});
   } else if (b.dataset.act === "research") {
     if (!confirm("「" + b.dataset.q + "」을(를) 1번 에이전트로 다시 조사할까요? (1~3분 · API 비용)")) return;
     startJob("/api/research", {query: b.dataset.q});
   }
 });
+document.addEventListener("submit", function (ev) {   // 3번 협상 폼 → /api/neg (메일은 보내지 않음, 초안만)
+  var f = ev.target.closest("form.negf");
+  if (!f) return;
+  ev.preventDefault();
+  var body = {};
+  new FormData(f).forEach(function (v, k) { body[k] = v; });
+  var sub = ev.submitter;
+  if (sub && sub.name) body[sub.name] = sub.value;
+  var ask = (sub && sub.dataset.confirm) || f.dataset.confirm;
+  if (ask && !confirm(ask)) return;
+  startJob("/api/neg", body);
+});
+function jobTarget(j) { return j.anchor ? "#" + j.anchor : (j.product_id ? "#p" + j.product_id : ""); }
 var timer = null;
 function poll() {
   api("/api/jobs").then(function (jobs) {
     var running = jobs.some(function (j) { return j.status === "running"; });
-    panel.hidden = !jobs.length;
-    panel.innerHTML = jobs.map(function (j) {
+    var shown = jobs.filter(function (j) { return !closedJobs[j.id]; });   // 닫은 알림은 숨김 (작업은 계속 진행)
+    panel.hidden = !shown.length;
+    panel.innerHTML = (shown.length > 1 ? '<div class="jobs-head"><span class="small muted">작업 ' + shown.length +
+        '개</span><button type="button" class="x" data-close="all" title="모두 닫기" aria-label="모두 닫기">모두 닫기 ✕</button></div>' : "") +
+      shown.map(function (j) {
       var st = {running: "⏳ 실행 중", done: "✅ 완료", failed: "❌ 실패"}[j.status] || j.status;
-      var go = j.product_id && j.status === "done" ? ' <a href="#p' + j.product_id + '" class="go" data-reload="1">결과 보기</a>' : "";
-      return '<div class="job ' + j.status + '"><b>' + esc(j.label) + '</b> <span class="small">' + st + ' · ' + esc(j.elapsed) + go +
+      var go = jobTarget(j) && j.status === "done" ? ' <a href="' + esc(jobTarget(j)) + '" class="go" data-reload="1">결과 보기</a>' : "";
+      return '<div class="job ' + j.status + '"><button type="button" class="x" data-close="' + esc(j.id) +
+        '" title="닫기" aria-label="닫기">✕</button><b>' + esc(j.label) + '</b> <span class="small">' + st + ' · ' + esc(j.elapsed) + go +
         '</span><pre>' + esc(j.lines.join("\\n")) + '</pre></div>';
     }).join("");
+    lastJobs = jobs;
     jobs.forEach(function (j) {               // 이 화면에서 시작한 작업이 끝나면 새 데이터로 다시 그리고 결과로 이동
       if (mine[j.id] && j.status !== "running") {
         delete mine[j.id];
-        if (j.status === "done") { location.hash = j.product_id ? "#p" + j.product_id : location.hash; location.reload(); }
+        if (j.status === "done") { location.hash = jobTarget(j) || location.hash; location.reload(); }
       }
     });
     clearTimeout(timer);
@@ -748,6 +1056,12 @@ function poll() {
   }).catch(function () { clearTimeout(timer); timer = setTimeout(poll, 5000); });
 }
 panel.addEventListener("click", function (ev) {
+  var x = ev.target.closest("button[data-close]");
+  if (x) {                                    // 알림만 닫음 — 실행 중인 작업은 멈추지 않음
+    if (x.dataset.close === "all") lastJobs.forEach(function (j) { closedJobs[j.id] = true; });
+    else closedJobs[x.dataset.close] = true;
+    saveClosed(); poll(); return;
+  }
   var a = ev.target.closest("a.go"); if (!a) return;
   ev.preventDefault(); location.hash = a.getAttribute("href"); location.reload();
 });
@@ -775,15 +1089,19 @@ def _render(conn, server):
     pages = [f'<div class="page" id="p-home">{home}</div>']
     for agent, no, name, roles in AGENT_PAGES:
         pages.append(f'<div class="page" id="p-a{no}" hidden>{agent_page(conn, agent, no, name, roles)}</div>')
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        if agent == "sourcing":
+            pages.append(f'<div class="page" id="p-buy" hidden>{buying.page()}</div>')
+    now =datetime.now().strftime("%Y-%m-%d %H:%M")
     return f"""<!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>무역 대시보드</title><style>{CSS}</style></head>
 <body>
 <div class="top"><div class="top-in">
 <header><h1>1인 수입 무역 대시보드</h1>
-<div class="search"><input id="q" type="search" autocomplete="off"
-  placeholder="품목 검색{' · 없으면 새로 조사' if server else ''} (예: 무선 기계식 키보드)">
+<div class="search"><div class="sbox"><input id="q" type="search" autocomplete="off" aria-label="품목 검색"
+  placeholder="품목 검색{' · 없으면 새로 조사' if server else ''} (예: 무선 기계식 키보드)"><button type="button" id="q-go"
+  class="sgo" title="검색" aria-label="검색"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+  stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></button></div>
 <div id="q-results" class="results" hidden></div></div>
 <span class="muted small">{now} 기준 · {'서버 모드 (새로고침하면 최신)' if server else '최신화: <code>trade_hub dashboard</code> · 조사 실행은 <code>trade_hub serve</code>'}</span></header>
 {nav(conn)}

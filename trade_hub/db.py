@@ -26,7 +26,7 @@ from pathlib import Path
 
 PKG_DIR = Path(__file__).resolve().parent
 SCHEMA_PATH = PKG_DIR / "schema.sql"
-SCHEMA_VERSION = 6   # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
+SCHEMA_VERSION = 9  # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
 # 버전별로 추가된 컬럼: 예전 DB에는 connect() 때 ALTER TABLE로 붙인다 (새 DB는 schema.sql에 이미 있음)
 
 
@@ -47,7 +47,78 @@ MIGRATIONS = {
         ("product_suppliers", "evidence_json", _json_col("evidence_json"))],
     5: [("product_suppliers", "max_order_qty", "INTEGER")],
     6: [],   # product_channels 테이블 추가 (새 테이블은 schema.sql의 CREATE TABLE IF NOT EXISTS로 예전 DB에도 생김)
+    7: [("messages", "language", "TEXT"), ("messages", "translation", "TEXT"),   # 3번 negotiation 연결
+        ("messages", "analysis_json", _json_col("analysis_json"))],
+    8: [],   # product_suppliers 한 줄 기준 (품목, 공급처) → (품목, 공급처, 구매 방식): _migrate_v8 (칸 추가가 아닌 유일한 예외)
+    9: [("messages", "external_id", "TEXT"), ("messages", "external_thread_id", "TEXT"),   # 3번 Gmail 연동
+        ("messages", "external_draft_id", "TEXT")],
 }
+PS_UNIQUE_INDEX = ("CREATE UNIQUE INDEX IF NOT EXISTS ux_ps_product_supplier_mode "
+                   "ON product_suppliers(product_id, supplier_id, COALESCE(purchase_mode, ''))")
+# v9 칸에 거는 인덱스: 예전 DB는 schema.sql 실행 시점에 칸이 없으므로 마이그레이션 뒤에 만든다
+MSG_EXTERNAL_INDEXES = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_messages_external ON messages(external_id) WHERE external_id IS NOT NULL",
+    "CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(external_thread_id) WHERE external_thread_id IS NOT NULL",
+)
+
+
+def _ps_has_old_unique(conn):
+    """예전 테이블 제약 UNIQUE(product_id, supplier_id)가 남아 있는가."""
+    for idx in conn.execute("PRAGMA index_list(product_suppliers)").fetchall():
+        if idx["unique"] and idx["origin"] == "u":
+            cols = [r["name"] for r in conn.execute(f"PRAGMA index_info('{idx['name']}')")]
+            if cols == ["product_id", "supplier_id"]:
+                return True
+    return False
+
+
+def _migrate_v8(conn, path):
+    """product_suppliers를 새 정의(schema.sql)로 다시 만들어 2칸 UNIQUE를 없애고, 3칸 고유 인덱스를 건다.
+    SQLite는 제약을 바꿀 수 없어 '새 테이블 만들기 → 복사 → 교체' (id 그대로 → messages·quotes·orders 연결 유지).
+    바꾸기 전에 data/backups/before_v8_<시각>.db로 백업한다."""
+    if _ps_has_old_unique(conn):
+        if conn.execute("SELECT COUNT(*) FROM product_suppliers").fetchone()[0]:
+            bdir = Path(path).parent / "backups"
+            bdir.mkdir(parents=True, exist_ok=True)
+            dest = sqlite3.connect(bdir / f"before_v8_{datetime.now():%Y%m%d_%H%M%S}.db")
+            try:
+                conn.backup(dest)
+            finally:
+                dest.close()
+        ddl = re.search(r"CREATE TABLE IF NOT EXISTS product_suppliers \((.*?)\n\);", SCHEMA_PATH.read_text(encoding="utf-8"),
+                        re.S)[1]
+        old_level = conn.isolation_level
+        conn.isolation_level = None          # 트랜잭션을 직접 관리 (외래키 끄기는 트랜잭션 밖에서만 됨)
+        conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            conn.execute("BEGIN IMMEDIATE")   # 다른 프로세스가 동시에 바꾸지 못하게
+            try:
+                if _ps_has_old_unique(conn):  # 잠금을 잡은 뒤 다시 확인 (그새 다른 프로세스가 끝냈을 수 있음)
+                    conn.execute(f"CREATE TABLE product_suppliers_v8 ({ddl}\n)")
+                    new_cols = {r["name"]: r for r in conn.execute("PRAGMA table_info(product_suppliers_v8)")}
+                    names = [r["name"] for r in conn.execute("PRAGMA table_info(product_suppliers)") if r["name"] in new_cols]
+                    # 예전 줄에 NULL이 있어도 새 테이블의 NOT NULL·기본값 칸이면 기본값으로 채움 (예: updated_at)
+                    picks = [f"COALESCE({n}, {new_cols[n]['dflt_value']})" if new_cols[n]["notnull"] and new_cols[n]["dflt_value"]
+                             else n for n in names]
+                    conn.execute(f"INSERT INTO product_suppliers_v8 ({', '.join(names)}) "
+                                 f"SELECT {', '.join(picks)} FROM product_suppliers")
+                    conn.execute("DROP TABLE product_suppliers")
+                    conn.execute("ALTER TABLE product_suppliers_v8 RENAME TO product_suppliers")
+                    conn.execute("CREATE INDEX IF NOT EXISTS idx_ps_product ON product_suppliers(product_id, status)")
+                    # 메일·견적·발주가 가리키는 공급처 줄이 모두 그대로 있는지 (id를 유지했으므로 0건이어야 함)
+                    bad = [r for t in ("messages", "quotes", "orders")
+                           for r in conn.execute(f"PRAGMA foreign_key_check({t})").fetchall() if r[2] == "product_suppliers"]
+                    if bad:
+                        raise RuntimeError(f"v8 마이그레이션 후 공급처 연결이 끊긴 줄 {len(bad)}건 → 되돌림")
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+        finally:
+            conn.execute("PRAGMA foreign_keys = ON")
+            conn.isolation_level = old_level
+    with conn:
+        conn.execute(PS_UNIQUE_INDEX)
 
 STAGES = ["candidate", "sourcing", "negotiating", "sampling", "ordered", "shipping", "selling", "closed"]
 TERMINAL_STAGES = {"closed", "dropped"}
@@ -72,6 +143,8 @@ def connect(path=None):
     conn.execute("PRAGMA journal_mode = WAL")     # 여러 에이전트·슈퍼바이저가 동시에 읽고 써도 덜 막히게
     conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
     version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version < 8:
+        _migrate_v8(conn, path)   # 테이블 교체는 칸 추가와 따로 (새 정의에 v4~v5 칸이 이미 들어 있음)
     if version < SCHEMA_VERSION:
         with conn:
             for v in sorted(MIGRATIONS):
@@ -82,6 +155,9 @@ def connect(path=None):
                     if col not in cols:
                         conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+    with conn:
+        for sql in MSG_EXTERNAL_INDEXES:
+            conn.execute(sql)
     return conn
 
 
@@ -229,10 +305,10 @@ def save_channels(conn, product_id, run_id, channels, purchase_mode=None):
     return n
 
 
-def latest_channels(conn, product_id):
-    """품목의 가장 최근 실행분 사이트 순위 (순위순)."""
-    last = conn.execute("SELECT run_id FROM product_channels WHERE product_id = ? ORDER BY id DESC LIMIT 1",
-                        (product_id,)).fetchone()
+def latest_channels(conn, product_id, purchase_mode=None):
+    """품목의 가장 최근 실행분 사이트 순위 (순위순). purchase_mode를 주면 그 구매 방식으로 평가한 실행 중 최신."""
+    last = conn.execute("SELECT run_id FROM product_channels WHERE product_id = ? AND (? IS NULL OR purchase_mode = ?)"
+                        " ORDER BY id DESC LIMIT 1", (product_id, purchase_mode, purchase_mode)).fetchone()
     if last is None:
         return []
     return conn.execute("SELECT * FROM product_channels WHERE product_id = ? AND run_id IS ? ORDER BY rank, id",
@@ -293,8 +369,18 @@ def link_supplier(conn, product_id, supplier_id, run_id=None, **fields):
     """품목-공급처 연결을 만들거나 갱신한다. status(연락·견적 진행 상태)는 다른 단계가 바꾼 값을 유지. id를 돌려준다."""
     fields = _check_fields(fields, LINK_FIELDS, "품목-공급처")
     fields = {k: dumps(v) if k.endswith("_json") and not isinstance(v, str) else v for k, v in fields.items()}
-    row = conn.execute("SELECT id FROM product_suppliers WHERE product_id = ? AND supplier_id = ?",
-                       (product_id, supplier_id)).fetchone()
+    # 한 줄 = (품목, 공급처, 구매 방식) [v8]. 구매 방식을 주면 그 방식의 줄 → 없으면 방식이 비어 있는 예전 줄을 이어받음.
+    # 구매 방식을 안 주면 줄이 하나일 때만 그 줄을 갱신 (여러 방식이 있으면 어느 줄인지 알 수 없어 오류)
+    rows = conn.execute("SELECT id, purchase_mode FROM product_suppliers WHERE product_id = ? AND supplier_id = ?",
+                        (product_id, supplier_id)).fetchall()
+    mode = fields.get("purchase_mode")
+    if mode is not None:
+        row = (next((r for r in rows if r["purchase_mode"] == mode), None)
+               or next((r for r in rows if r["purchase_mode"] is None), None))
+    elif len(rows) > 1:
+        raise ValueError(f"품목 {product_id}·공급처 {supplier_id}의 줄이 구매 방식별로 {len(rows)}개 → purchase_mode를 지정하세요")
+    else:
+        row = rows[0] if rows else None
     if row is None:
         cols = ["product_id", "supplier_id", "run_id", *fields]
         return conn.execute(f"INSERT INTO product_suppliers ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",

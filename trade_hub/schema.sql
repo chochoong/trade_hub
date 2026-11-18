@@ -157,8 +157,10 @@ CREATE TABLE IF NOT EXISTS product_suppliers (
     unverified_json       TEXT CHECK (unverified_json IS NULL OR json_valid(unverified_json)),       -- 확인하지 못한 항목 ["...", ...]
     evidence_json         TEXT CHECK (evidence_json IS NULL OR json_valid(evidence_json)),           -- 근거 [{"claim":"...","url":"..."}]
     reject_reason    TEXT,
-    updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime')),
-    UNIQUE (product_id, supplier_id)
+    updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime'))
+    -- 한 줄 = (품목, 공급처, 구매 방식) [v8]. 같은 업체가 retail·small_batch 양쪽에 나와도 따로 남는다.
+    -- 고유 조건은 db.connect()가 만드는 인덱스 ux_ps_product_supplier_mode
+    --   (product_id, supplier_id, COALESCE(purchase_mode, '')) — v7 이전 DB는 purchase_mode 칸이 없어 여기 못 둠
 );
 
 -- -----------------------------------------------------------------------------
@@ -179,7 +181,16 @@ CREATE TABLE IF NOT EXISTS messages (
                              'sent',       -- 사람이 직접 발송함
                              'discarded',  -- 버림
                              'received')), -- 받은 답장 (inbound, 사람이 붙여넣음)
-    reply_to_id          INTEGER REFERENCES messages(id),
+    reply_to_id          INTEGER REFERENCES messages(id),   -- 후속 메일 → 원래 보낸 메일
+    language             TEXT,                -- en / zh ...  [v7]
+    translation          TEXT,                -- 한국어 번역 (보낸 초안·받은 답장)  [v7]
+    analysis_json        TEXT CHECK (analysis_json IS NULL OR json_valid(analysis_json)),   -- 3번 분석 결과  [v7]
+                                              --   받은 답장: {"summary_ko","open_questions_ko",...}
+                                              --     NULL = 아직 분석 안 함 (3번 auto가 처리) / {"error": ...} = 분석 실패
+                                              --   보낸 초안: {"strategy_ko","tone"} — 사람 참고용, 발송 안 됨
+    external_id          TEXT,                -- 메일 서비스의 메시지 id (Gmail: 보낸/받은 메일). 같은 메일 중복 저장 방지  [v9]
+    external_thread_id   TEXT,                -- 메일 서비스의 대화(스레드) id — 답장을 어느 공급처 줄에 붙일지 판단  [v9]
+    external_draft_id    TEXT,                -- 메일 서비스 임시보관함에 넣은 초안 id (발송은 사람이 직접)  [v9]
     created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime')),
     sent_at              TEXT,                -- 발송/수신 시각
     CHECK ((direction = 'inbound') = (status = 'received'))

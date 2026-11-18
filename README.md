@@ -84,7 +84,8 @@ python supervisor.py backup          # 공용 DB 백업 (tick에서 하루 1번 
 |---|---|---|
 | 1. discover | `../supplier_agent` | 연결됨 (주 1회) |
 | 2. sourcing | `../trade_sourcing_agent` | 설정 예시만 (꺼짐) — 공용 DB 연동 필요 |
-| 3·5·6·8 | 미정 | 설정 예시만 (꺼짐) |
+| 3. negotiation | `../negotiation_agent` | 연결됨 — 대시보드 3번 페이지 버튼 + 슈퍼바이저 `auto`(답장 분석·후속 메일) |
+| 5·6·8 | 미정 | 설정 예시만 (꺼짐) |
 
 ## 5. 테스트
 

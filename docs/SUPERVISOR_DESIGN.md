@@ -15,7 +15,7 @@
 |---|---|---|---|---|
 | 1 | `discover` | 시장조사·아이템 발굴 | `../supplier_agent` | ✅ 연결됨 |
 | 2 | `sourcing` | 공급처 발굴 | `../trade_sourcing_agent` | ✅ 연결됨 (`python -m sourcing_agent from-db`, 7장) |
-| 3 | `negotiation` | 커뮤니케이션·협상 (메일은 초안만) | 미정 | - |
+| 3 | `negotiation` | 커뮤니케이션·협상 (메일은 초안만) | `../negotiation_agent` | ✅ 연결됨 (7.7) |
 | 4 | `documents` | 무역서류 (PI·CI·PL·계약서) | 미정 | - |
 | 5 | `compliance` | 통관·규제 체크 | 미정 | - |
 | 6 | `costing` | 원가·수익 계산 | 미정 | - |
@@ -234,3 +234,35 @@ trade_hub summary / tasks / briefing
    검토관이 "어느 업체에 먼저 연락할지" 같은 단계 간 판단을 할 수 있다.
 5. `trade_hub/.env`에 네이버 키가 추가됐다(검토관 LLM 키와 같은 파일). 검토관은 이 키를 쓰지 않는다.
 
+
+### 7.6 대시보드 서버 `trade_hub serve` (2026-11-17 추가)
+- `trade_hub serve [--port 8765] [--no-open] [--no-ref]` → `http://127.0.0.1:8765` (이 PC에서만, `trade_hub/server.py`).
+  정적 대시보드와 같은 화면 + **검색창 → [새로 조사]**, 후보의 **[공급처 찾기]·[다시 조사]**, 실행 중 작업 패널.
+- 서버는 에이전트 일을 하지 않고 **에이전트를 별도 프로세스로 실행만** 한다 (슈퍼바이저 dispatch와 같은 방식):
+  | 버튼 | 실행 | 실행 폴더·파이썬 |
+  |---|---|---|
+  | 새로 조사 / 다시 조사 | `supplier_agent.py --product "<검색어>" --no-open` | `supervisor.json`의 `discover` cwd, 현재 파이썬 |
+  | 공급처 찾기 | (후보면 `set_stage → sourcing`, 사람 결정) 후 `-m sourcing_agent from-db <번호>` | `sourcing` cwd, `command[0]`의 venv 파이썬 |
+  - `TRADE_DB`·`PYTHONIOENCODING=utf-8` 전달, 로그 `data/logs/<시각>_serve_<종류>.log`, 제한 시간은 설정의 `timeout_minutes`.
+  - 1번 `--product` 모드: 지정 품목 하나만 평가해 `products`(origin=`manual`)·`product_scores`에 기록.
+    `agent_runs.args_json = {"product": "..."}`, 리포트 폴더 `reports/<시각>_product`. 마지막에 `RESULT_PRODUCT_ID=<번호>` 출력.
+- **슈퍼바이저와 겹치지 않게**: 같은 에이전트가 `agent_runs.status='running'`(제한 시간 이내)이면 서버는 실행을 거부(409).
+  반대로 서버가 띄운 실행도 각 에이전트가 `agent_runs`에 남기므로 슈퍼바이저의 "실행 중이면 건너뜀"이 그대로 적용된다.
+- 서버가 바꾸는 DB 값은 **[공급처 찾기]의 candidate → sourcing 단계 이동 하나뿐** (`product_events` note `"사람이 선정 → 공급처 발굴로 (대시보드)"`, run_id NULL = 사람).
+- 보안: 127.0.0.1에만 바인딩, Host 헤더 확인, 실행(POST)은 `X-Trade-Hub: 1` 헤더 필수, `/file`은 `data/images`·1번 `reports`·2번 `output`만.
+- 참고 이미지는 1시간마다 또는 사진 없는 품목 목록이 바뀔 때만 다시 검색.
+
+### 7.7 3번(negotiation) 연결 — `../negotiation_agent` (2026-11-17)
+- 스키마 **v7**: `messages.language`·`translation`(한국어 번역)·`analysis_json` 추가 (컬럼 추가만).
+  받은 답장의 `analysis_json IS NULL` = 아직 분석 안 함, `{"error":...}` = 분석 실패(자동 재시도 안 함 → 대시보드 [다시 분석]).
+- 명령 (`cwd ../negotiation_agent`, `{python}`): `python -m negotiation_agent rfq|reply|analyze|counter|followup|auto|mark ...`
+- **슈퍼바이저**: `negotiation` 켜짐, `auto` = 분석 안 된 답장 분석 + 후속 메일 초안(보낸 뒤 3일 무응답, 메일당 최대 2회).
+  `when_sql`은 `negotiation_agent/negotiation_agent/hub.py FOLLOWUP_DUE_SQL`과 같은 조건 — 바꾸면 같이 바꿀 것. RFQ·역제안은 자동으로 만들지 않음(사람이 버튼).
+- **대시보드 서버** `POST /api/neg {action, ...}` → `server.neg_args`가 값을 검증해 `--옵션=값` 인자로 바꾸고 3번을 실행만 한다.
+  답장 붙여넣기는 `data/inbox/*.txt`로 넘기고 3번이 저장 후 지움. 출력 `RESULT_ANCHOR=ps-<연결번호>` → 끝나면 그 공급처로 이동.
+  같은 대상·같은 작업이 이 서버에서 실행 중일 때만 거절(다른 공급처 작업은 동시에 가능).
+- 3번이 쓰는 것: `messages`, `quotes`, `tasks`(send_message·review_quote), `product_suppliers.status`(candidate→contacted→quoted, 앞으로만).
+  사람이 첫 메일을 '발송 완료'로 표시하면 `products.stage` sourcing → negotiating (`product_events.run_id` NULL = 사람).
+  '발송 완료'·'버림'·'검토 완료' 표시는 LLM 없이 `mark`로 처리하고 `agent_runs`에 남기지 않는다.
+- 내부 상한가는 공용 DB에 없다 (`negotiation_agent/data/private.db`). 검토관 스냅샷에 넣지 말 것.
+- 검토관이 참고할 만한 것: 대기 중인 `send_message` 할 일 = 사람이 아직 안 보낸 초안, `review_quote` = 받은 견적.

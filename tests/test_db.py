@@ -275,3 +275,99 @@ def test_channels_table_created_on_old_db(tmp_path):
     assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'product_channels'").fetchone()
     assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
     conn.close()
+
+
+# --- v8: 한 줄 = (품목, 공급처, 구매 방식) ---------------------------------------------
+def test_same_supplier_kept_separately_per_purchase_mode(conn):
+    with conn:
+        pid = db.upsert_product(conn, "AI안경", stage="sourcing")
+        sid = db.upsert_supplier(conn, "NAMOFOTO", "China")
+        small = db.link_supplier(conn, pid, sid, purchase_mode="small_batch", score=30.0, moq="50 pcs")
+        retail = db.link_supplier(conn, pid, sid, purchase_mode="retail", score=72.0, moq="1 piece")
+        again = db.link_supplier(conn, pid, sid, purchase_mode="small_batch", score=35.0)   # 같은 방식 → 그 줄 갱신
+    assert small != retail and again == small
+    got = dict(conn.execute("SELECT purchase_mode, score FROM product_suppliers").fetchall())
+    assert got == {"small_batch": 35.0, "retail": 72.0}                                     # 서로 덮어쓰지 않음
+    with pytest.raises(ValueError, match="purchase_mode"):                                  # 어느 줄인지 모르면 오류
+        db.link_supplier(conn, pid, sid, moq="10 pcs")
+    import sqlite3
+    with pytest.raises(sqlite3.IntegrityError):                                             # 같은 방식 두 줄은 막힘
+        with conn:
+            conn.execute("INSERT INTO product_suppliers (product_id, supplier_id, purchase_mode) VALUES (?, ?, 'retail')",
+                         (pid, sid))
+
+
+def test_legacy_row_without_mode_is_adopted(conn):
+    with conn:
+        pid = db.upsert_product(conn, "키캡", stage="sourcing")
+        sid = db.upsert_supplier(conn, "Keycap Co", "China")
+        old = db.link_supplier(conn, pid, sid, moq="50 pcs")                  # 구매 방식 기록 전 저장분
+        assert db.link_supplier(conn, pid, sid, moq="40 pcs") == old          # 줄이 하나면 방식 없이도 갱신
+        assert db.link_supplier(conn, pid, sid, purchase_mode="small_batch") == old   # 첫 방식 지정 → 그 줄을 이어받음
+    assert conn.execute("SELECT COUNT(*), MAX(purchase_mode) FROM product_suppliers").fetchone()[:] == (1, "small_batch")
+
+
+def test_v8_migration_rebuilds_old_table_and_keeps_links(tmp_path):
+    import sqlite3
+    path = tmp_path / "v7.db"
+    db.connect(path).close()                       # 최신 스키마로 만든 뒤 product_suppliers만 v7 모양(2칸 UNIQUE)으로 되돌림
+    old = sqlite3.connect(path)
+    old.executescript("""
+        PRAGMA foreign_keys = OFF;
+        DROP INDEX IF EXISTS ux_ps_product_supplier_mode;
+        DROP TABLE product_suppliers;   -- (RENAME을 쓰면 다른 테이블의 외래키 이름까지 바뀌어 시험이 엉뚱해짐)
+        CREATE TABLE product_suppliers (id INTEGER PRIMARY KEY, product_id INTEGER NOT NULL, supplier_id INTEGER NOT NULL,
+            run_id INTEGER, status TEXT NOT NULL DEFAULT 'candidate', is_top_pick INTEGER NOT NULL DEFAULT 0, moq TEXT,
+            unit_price_usd REAL, price_note TEXT, est_landed_krw INTEGER, est_margin_pct REAL, image_url TEXT,
+            score REAL, grade TEXT, purchase_mode TEXT, reject_reason TEXT, updated_at TEXT,
+            UNIQUE (product_id, supplier_id));
+        INSERT INTO products (id, name) VALUES (1, '키캡');
+        INSERT INTO suppliers (id, company) VALUES (1, 'A'), (2, 'B');
+        INSERT INTO product_suppliers (id, product_id, supplier_id, status, moq, score, purchase_mode)
+            VALUES (7, 1, 1, 'contacted', '50 pcs', 54, 'small_batch'), (9, 1, 2, 'candidate', '1 piece', 30, 'small_batch');
+        INSERT INTO messages (product_supplier_id, direction, body, status) VALUES (7, 'outbound', 'RFQ', 'sent');
+        INSERT INTO quotes (product_supplier_id, unit_price_usd) VALUES (7, 2.8);
+        PRAGMA user_version = 7;""")
+    old.close()
+
+    conn = db.connect(path)                        # ← 여기서 v8 마이그레이션
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+    assert not db._ps_has_old_unique(conn)
+    rows = [tuple(r) for r in conn.execute("SELECT id, status, moq, score, purchase_mode FROM product_suppliers ORDER BY id")]
+    assert rows == [(7, "contacted", "50 pcs", 54.0, "small_batch"), (9, "candidate", "1 piece", 30.0, "small_batch")]
+    assert conn.execute("SELECT product_supplier_id FROM messages").fetchone()[0] == 7      # 연결 유지
+    assert conn.execute("SELECT product_supplier_id FROM quotes").fetchone()[0] == 7
+    assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1                            # 외래키 다시 켜짐
+    with conn:                                     # 이제 같은 업체를 retail로 따로 저장 가능
+        db.link_supplier(conn, 1, 1, purchase_mode="retail", moq="1 piece")
+    assert conn.execute("SELECT COUNT(*) FROM product_suppliers WHERE supplier_id = 1").fetchone()[0] == 2
+    assert list((tmp_path / "backups").glob("before_v8_*.db"))                               # 바꾸기 전 백업
+    conn.close()
+    db.connect(path).close()                       # 다시 연결해도 아무 일 없음 (두 번 하지 않음)
+
+
+def test_v9_adds_gmail_columns_to_old_db(tmp_path):
+    """v8 DB → v9: messages에 external_* 칸 + 같은 Gmail 메일 중복 저장 방지 인덱스."""
+    import sqlite3
+    path = tmp_path / "old.db"
+    db.connect(path).close()
+    old = sqlite3.connect(path)
+    old.executescript("DROP INDEX ux_messages_external; DROP INDEX idx_messages_thread;"
+                      "ALTER TABLE messages DROP COLUMN external_id; ALTER TABLE messages DROP COLUMN external_thread_id;"
+                      "ALTER TABLE messages DROP COLUMN external_draft_id; PRAGMA user_version = 8;")
+    old.close()
+    conn = db.connect(path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(messages)")}
+    assert {"external_id", "external_thread_id", "external_draft_id"} <= cols
+    with conn:
+        pid = db.upsert_product(conn, "키캡")
+        sid = db.upsert_supplier(conn, "A")
+        ps = db.link_supplier(conn, pid, sid)
+        conn.execute("INSERT INTO messages (product_supplier_id, direction, body, status, external_id)"
+                     " VALUES (?, 'inbound', 'hi', 'received', 'g1')", (ps,))
+    with pytest.raises(sqlite3.IntegrityError):
+        with conn:
+            conn.execute("INSERT INTO messages (product_supplier_id, direction, body, status, external_id)"
+                         " VALUES (?, 'inbound', 'hi', 'received', 'g1')", (ps,))
