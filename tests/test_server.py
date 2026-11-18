@@ -128,8 +128,13 @@ def test_select_passes_purchase_mode(srv, conn, monkeypatch):
     code, job = call(srv + "/api/select", {"product_id": b})                   # 방식이 없으면 소량 사입 (기존 동작)
     assert code == 200 and "소량 사입용" in job["label"]
     wait_job(srv, job["id"])
-    assert seen == [("sourcing", (a, "retail")), ("sourcing", (b, "small_batch"))]
+    code, job = call(srv + "/api/select", {"product_id": a, "mode": "retail", "country": "Japan"})
+    assert code == 200 and "(일본)" in job["label"]
+    wait_job(srv, job["id"])
+    assert seen == [("sourcing", (a, "retail", "China")), ("sourcing", (b, "small_batch", "China")),
+                    ("sourcing", (a, "retail", "Japan"))]
     assert call(srv + "/api/select", {"product_id": a, "mode": "oem; rm -rf"})[0] == 400   # 정해진 값만
+    assert call(srv + "/api/select", {"product_id": a, "country": "Korea"})[0] == 400
 
 
 def test_job_command_builds_type_flag(monkeypatch, tmp_path):
@@ -139,6 +144,10 @@ def test_job_command_builds_type_flag(monkeypatch, tmp_path):
     assert real("sourcing", 7)[0][-2:] == ["--type", "small_batch"]
     with pytest.raises(ValueError):
         real("sourcing", (7, "oem"))                                             # 대시보드에서는 retail·small_batch만
+    assert real("sourcing", (7, "retail", "Japan"))[0][-4:] == ["--type", "retail", "--country", "Japan"]
+    assert "--country" not in real("sourcing", (7, "retail", "China"))[0]       # 중국은 2번 기본값
+    with pytest.raises(ValueError):
+        real("sourcing", (7, "retail", "Korea"))
 
 
 def test_buy_search_runs_buyagent(srv, monkeypatch, tmp_path):

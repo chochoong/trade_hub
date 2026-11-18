@@ -261,6 +261,13 @@ def candidate_rows(conn):
 
 
 MODE_BUTTONS = (("retail", "구매대행"), ("small_batch", "소량 사입"))
+COUNTRIES = (("China", "중국"), ("Japan", "일본"))          # 2번 sourcing_agent --country 값
+
+
+def country_select():
+    """[공급처 찾기] 버튼 옆 국가 선택 (같은 묶음의 버튼이 이 값을 함께 보냄)."""
+    opts = "".join(f'<option value="{k}">{n}</option>' for k, n in COUNTRIES)
+    return f'<select class="country" title="어느 나라 공급처를 찾을지">{opts}</select>'
 
 
 def actions(p):
@@ -268,7 +275,8 @@ def actions(p):
     name = e(p["name"])
     btns = "".join(f'<button type="button" class="btn primary" data-act="select" data-id="{p["id"]}" data-name="{name}" '
                    f'data-mode="{mode}" data-mode-label="{label}">{label}용 찾기</button>' for mode, label in MODE_BUTTONS)
-    return f'<div class="acts">{btns}<button type="button" class="btn" data-act="research" data-q="{name}">다시 조사</button></div>'
+    return (f'<div class="acts">{country_select()}{btns}'
+            f'<button type="button" class="btn" data-act="research" data-q="{name}">다시 조사</button></div>')
 
 
 def sourcing_button(p, modes_found):
@@ -276,10 +284,10 @@ def sourcing_button(p, modes_found):
     if not SERVER["on"] or p["stage"] != "sourcing":
         return ""
     name = e(p["name"])
-    return " " + "".join(
+    return ' <span class="acts">' + country_select() + "".join(
         f'<button type="button" class="btn{"" if mode in modes_found else " primary"}" data-act="select" data-id="{p["id"]}" '
         f'data-name="{name}" data-mode="{mode}" data-mode-label="{label}">{label}용 {"다시 " if mode in modes_found else ""}찾기</button>'
-        for mode, label in MODE_BUTTONS)
+        for mode, label in MODE_BUTTONS) + "</span>"
 
 
 def product_index(conn):
@@ -1010,8 +1018,10 @@ document.addEventListener("click", function (ev) {
   if (!b) return;
   if (b.dataset.act === "select") {
     var mode = b.dataset.mode || "small_batch", ml = b.dataset.modeLabel || "소량 사입";
+    var cs = b.parentNode.querySelector("select.country"), country = cs ? cs.value : "China";
+    ml += " · " + (cs ? cs.options[cs.selectedIndex].text : "중국");
     if (!confirm("#" + b.dataset.id + " " + b.dataset.name + "\\n[" + ml + "] 방식으로 공급처를 찾을까요? 공급처 발굴 단계로 넘기고 2번 에이전트를 실행합니다. (5~10분 · API 비용)")) return;
-    startJob("/api/select", {product_id: Number(b.dataset.id), mode: mode});
+    startJob("/api/select", {product_id: Number(b.dataset.id), mode: mode, country: country});
   } else if (b.dataset.act === "research") {
     if (!confirm("「" + b.dataset.q + "」을(를) 1번 에이전트로 다시 조사할까요? (1~3분 · API 비용)")) return;
     startJob("/api/research", {query: b.dataset.q});

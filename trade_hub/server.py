@@ -69,6 +69,7 @@ def agent_spec(agent):
 
 # 대시보드에서 고를 수 있는 2번 구매 방식 (슈퍼바이저 자동 실행은 supervisor.json대로 small_batch만)
 PURCHASE_MODES = {"retail": "구매대행", "small_batch": "소량 사입"}
+COUNTRIES = {"China": "중국", "Japan": "일본"}                   # 2번 sourcing_agent --country 값 (기본 China)
 
 
 def job_command(kind, arg):
@@ -76,12 +77,15 @@ def job_command(kind, arg):
     if kind == "research":
         cwd, python, timeout = agent_spec("discover")
         return [python, "supplier_agent.py", "--product", arg, "--no-open"], cwd, timeout
-    if kind == "sourcing":                  # arg = (품목 번호, 구매 방식) — select가 PURCHASE_MODES로 검증한 값
-        pid, mode = arg if isinstance(arg, tuple) else (arg, "small_batch")
+    if kind == "sourcing":                  # arg = (품목 번호, 구매 방식[, 국가]) — select가 검증한 값
+        pid, mode, country = (*arg, "China")[:3] if isinstance(arg, tuple) else (arg, "small_batch", "China")
         if mode not in PURCHASE_MODES:
             raise ValueError(f"구매 방식: {mode!r}")
+        if country not in COUNTRIES:
+            raise ValueError(f"국가: {country!r}")
         cwd, python, timeout = agent_spec("sourcing")
-        return [python, "-m", "sourcing_agent", "from-db", str(int(pid)), "--type", mode], cwd, timeout
+        cmd = [python, "-m", "sourcing_agent", "from-db", str(int(pid)), "--type", mode]
+        return cmd + (["--country", country] if country != "China" else []), cwd, timeout   # 중국은 2번 기본값
     if kind == "buysearch":                 # 구매대행: arg = (검색어, 카테고리[, 사이트]) — buy_search가 검증한 값
         q, cat, market = (*arg, "rakuten")[:3]
         if market not in BUY_MARKETS:
@@ -255,6 +259,9 @@ def select(conn, body):
     mode = body.get("mode") or "small_batch"
     if mode not in PURCHASE_MODES:
         return 400, {"error": f"구매 방식은 {', '.join(PURCHASE_MODES)} 중 하나여야 합니다."}
+    country = body.get("country") or "China"
+    if country not in COUNTRIES:
+        return 400, {"error": f"국가는 {', '.join(COUNTRIES)} 중 하나여야 합니다."}
     row = conn.execute("SELECT name, stage FROM products WHERE id = ?", (pid,)).fetchone()
     if row is None:
         return 404, {"error": f"품목 번호 {pid}가 없습니다."}
@@ -266,7 +273,8 @@ def select(conn, body):
     if row["stage"] == "candidate":           # 사람이 버튼으로 결정 → 단계 이동 (trade_hub select와 같음)
         with conn:
             db.set_stage(conn, pid, "sourcing", note="사람이 선정 → 공급처 발굴로 (대시보드)")
-    return 200, job_view(start_job("sourcing", (pid, mode), f"2번 {PURCHASE_MODES[mode]}용 공급처 찾기: #{pid} {row['name']}",
+    return 200, job_view(start_job("sourcing", (pid, mode, country),
+                                   f"2번 {PURCHASE_MODES[mode]}용 공급처 찾기 ({COUNTRIES[country]}): #{pid} {row['name']}",
                                    product_id=pid))
 
 
