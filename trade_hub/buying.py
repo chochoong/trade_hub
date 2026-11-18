@@ -172,7 +172,7 @@ def _search_section(data):
                f'<select name="category" title="관세율·마진 기준·차단 규칙이 카테고리마다 다릅니다">{opts}</select>'
                f'<button type="submit">🔎 검색</button></form>'
                '<p class="small muted">라쿠텐에서 검색해 개당 원가가 낮은 순으로 보여 줍니다 (30초~1분). '
-               '한글이 들어 있으면 AI가 일본어 검색어로 바꿔서 찾습니다 (1원 미만 · 같은 검색어는 다시 번역하지 않음). '
+               '한글이 들어 있으면 buyagent가 일본어 검색어로 바꿔서 찾습니다 (1원 미만 · 같은 검색어는 다시 번역하지 않음). '
                '모델명(예: SBTQ041)을 넣으면 그 단어가 들어간 상품만 남겨 부속품을 걸러 냅니다. '
                '감시 목록·가격 이력·알림에는 영향 없습니다.</p>')
     else:
@@ -203,8 +203,7 @@ def _search_section(data):
                      f'{num(o.get("price"), "{:,.0f}" if o.get("currency") in ("JPY", "KRW") else "{:,.2f}")} '
                      f'{e(o.get("currency"))} {ship}',
                      num(it.get("cost_krw"), "{:,}원"), *cells, clip(" / ".join(it.get("warnings") or []), 60)])
-    from trade_hub import translate
-    ko = q.get("keyword_original") or translate.original_of(q.get("keyword"))   # 한글로 검색했으면 원래 검색어도 보여 줌
+    ko = q.get("keyword_original")                       # 한글로 검색했으면 buyagent가 번역 → 원래 검색어도 보여 줌
     sub = (f'"{e(q.get("keyword") or "")}"' + (f' (← {e(ko)})' if ko else "") + ' · 카테고리'
            f' {e(q.get("category") or "")} · '
            f'{e((s.get("run_at") or "")[:16].replace("T", " "))} 검색 · 쇼핑몰 결과 {e(s.get("found", 0))}건')

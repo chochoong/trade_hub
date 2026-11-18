@@ -162,19 +162,31 @@ def test_buy_search_command(monkeypatch, tmp_path):
     assert cmd[1:] == ["main.py", "--search=--evil x", "--category=watch"] and cwd == tmp_path   # 옵션으로 오인 안 됨
 
 
-def test_buy_search_translates_korean(srv, monkeypatch, tmp_path):
-    from trade_hub import translate
+
+def test_buy_search_passes_korean_and_api_key(srv, monkeypatch, tmp_path):
+    from trade_hub import server
     base = tmp_path / "ba"
     (base / "config").mkdir(parents=True)
     (base / "config" / "categories.toml").write_text('[categories.watch]\nname = "시계"\nallowed = true\n', encoding="utf-8")
     monkeypatch.setenv("BUYAGENT_DIR", str(base))
-    monkeypatch.setattr(translate, "to_japanese", lambda q: "セイコー 腕時計")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(server, "dotenv_value", lambda path, name: "sk-test" if name == "ANTHROPIC_API_KEY" else None)
+    seen = {}
+    real_popen = server.subprocess.Popen
+    def spy(cmd, **kw):
+        seen["env"] = kw["env"]
+        return real_popen(cmd, **kw)
+    monkeypatch.setattr(server.subprocess, "Popen", spy)
     code, job = call(srv + "/api/buysearch", {"query": "세이코 시계", "category": "watch"})
-    assert code == 200 and "세이코 시계 → セイコー 腕時計" in job["label"]
-
-    def fail(q):
-        raise RuntimeError("번역 실패 (X): 일본어로 직접 입력해 주세요")
-    monkeypatch.setattr(translate, "to_japanese", fail)
+    assert code == 200 and "세이코 시계" in job["label"]                     # 한글 그대로 buyagent로
+    assert seen["env"]["ANTHROPIC_API_KEY"] == "sk-test"
     wait_job(srv, job["id"])
-    code, out = call(srv + "/api/buysearch", {"query": "세이코 시계", "category": "watch"})
-    assert code == 502 and "일본어로 직접" in out["error"]
+
+
+def test_dotenv_value(tmp_path):
+    from trade_hub.server import dotenv_value
+    f = tmp_path / ".env"
+    f.write_text('# 주석\nOTHER=1\nexport ANTHROPIC_API_KEY="abc def"  # 메모\nNAVER=x # y\n', encoding="utf-8")
+    assert dotenv_value(f, "ANTHROPIC_API_KEY") == "abc def"
+    assert dotenv_value(f, "NAVER") == "x" and dotenv_value(f, "NONE") is None
+    assert dotenv_value(tmp_path / "없음", "X") is None

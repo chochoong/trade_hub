@@ -23,6 +23,7 @@ trade_hub serve — 내 PC에서만 열리는 대시보드 서버 (http://127.0.
 import json
 import mimetypes
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -32,7 +33,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from trade_hub import buying, dashboard, db, translate
+from trade_hub import buying, dashboard, db
 
 ROOT = Path(__file__).resolve().parent.parent          # trade_hub 저장소 폴더
 CONFIG = ROOT / "supervisor.json"
@@ -132,6 +133,22 @@ def _kill(proc):
         proc.kill()
 
 
+def dotenv_value(path, name):
+    """.env에서 값 하나만 읽는다 (서버 환경변수 전체에 .env를 풀지 않으려고). 없으면 None."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        k, sep, v = line.strip().removeprefix("export ").partition("=")
+        if sep and k.strip() == name:
+            v = v.strip()
+            if v[:1] in ('"', "'") and v[0] in v[1:]:
+                return v[1:v.index(v[0], 1)] or None
+            return re.split(r"\s#", v, maxsplit=1)[0].strip() or None
+    return None
+
+
 def start_job(kind, arg, label, product_id=None, anchor=None):
     cmd, cwd, timeout = job_command(kind, arg)
     if not Path(cwd).is_dir():
@@ -143,6 +160,10 @@ def start_job(kind, arg, label, product_id=None, anchor=None):
            "product_id": product_id, "anchor": anchor, "lines": [], "started": time.time(), "ended": None, "exit_code": None,
            "log": str(logs / f"{datetime.now():%Y%m%d_%H%M%S}_serve_{kind}.log")}
     env = {**os.environ, "TRADE_DB": str(db.default_path().resolve()), "PYTHONIOENCODING": "utf-8"}
+    if kind == "buysearch" and not env.get("ANTHROPIC_API_KEY"):   # buyagent 한글 검색어 번역용 — 이 키 하나만 넘김
+        key = dotenv_value(ROOT / ".env", "ANTHROPIC_API_KEY")
+        if key:
+            env["ANTHROPIC_API_KEY"] = key
     proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             stdin=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace")
     with LOCK:
@@ -258,14 +279,8 @@ def buy_search(conn, body):
     with LOCK:
         if any(j["kind"] == "buysearch" and j["status"] == "running" for j in JOBS.values()):
             return 409, {"error": "직접 검색이 이미 실행 중입니다. 끝난 뒤 다시 눌러 주세요."}
-    shown = q
-    if translate.has_korean(q):              # 라쿠텐은 일본어로만 찾힌다 → 한글이면 일본어 검색어로 바꿔서 실행
-        try:
-            ja = translate.to_japanese(q)
-        except RuntimeError as err:
-            return 502, {"error": str(err)}
-        shown, q = f"{q} → {ja}", ja
-    return 200, job_view(start_job("buysearch", (q, cat), f"구매대행 검색: {shown} ({cats[cat]})", anchor="buy"))
+    # 한글 검색어는 buyagent가 일본어로 바꿔서 찾는다 (실행 로그에 "번역: 한글 → 일본어", search.json에 keyword_original)
+    return 200, job_view(start_job("buysearch", (q, cat), f"구매대행 검색: {q} ({cats[cat]})", anchor="buy"))
 
 
 # ---------------------------------------------------------------------------
