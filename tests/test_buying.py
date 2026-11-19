@@ -190,7 +190,7 @@ def test_search_shows_add_watch_or_already_watching(ba):
     dashboard.SERVER["on"] = True
     try:
         html = buying.page()
-        assert 'data-buywatch="add" data-name="세이코 SBTQ041"' in html
+        assert 'data-buywatch="add" data-name="세이코 SBTQ041"' in html and 'name="must" value="SBTQ041"' in html
         assert 'data-buywatch="toggle" data-id="ai-glasses">끄기' in html and 'data-id="watch">켜기' in html
         _search_json(ba, keyword="セイコー")                       # products.csv 의 watch 줄과 같은 검색어 (꺼진 상태)
         html = buying.page()
@@ -199,17 +199,63 @@ def test_search_shows_add_watch_or_already_watching(ba):
     assert 'data-buywatch="add"' not in html and "이미 감시 중 — ID <b>watch</b> (꺼짐" in html
 
 
-@pytest.mark.skipif(not REAL_WEB.is_file(), reason="buyagent web.py 없음")
-def test_watch_api_uses_buyagent_add_and_toggle(ba):
+def _copy_buyagent_code(ba):
     import shutil
     shutil.copy(REAL_WEB, ba / "web.py")
+    shutil.copytree(REAL_WEB.parent / "core", ba / "core", ignore=shutil.ignore_patterns("__pycache__"))
+
+
+@pytest.mark.skipif(not REAL_WEB.is_file(), reason="buyagent web.py 없음")
+def test_watch_call_uses_buyagent_add_and_toggle(ba):
+    _copy_buyagent_code(ba)
     _search_json(ba)
-    web = buying.watch_api(ba)
-    code, out = web.add_watch(ba, json.loads((ba / "reports" / "search.json").read_text(encoding="utf-8")), "세이코 SBTQ041")
-    assert code == 200
+    s = json.loads((ba / "reports" / "search.json").read_text(encoding="utf-8"))
+    code, out = buying.watch_call("add", ba, search=s, name="세이코 SBTQ041", must="SBTQ041|SBTQ")
+    assert code == 200, out
     row = buying.load()["products"][-1]
-    assert (row["id"], row["name"], row["keyword"], row["category"], row["sources"], row["active"]) == \
-        (out["id"], "세이코 SBTQ041", "セイコー SBTQ041", "watch", "ebay", "Y")
-    assert row["must_include"] == "SBTQ041" and row["exclude"] == "ベルト|バンド"
-    assert web.toggle_watch(ba, out["id"]) == (200, {"id": out["id"], "active": "N"})
-    assert buying.watch_api(ba) is web                                    # 같은 모듈 재사용 (CSV 잠금 공유)
+    assert (row["id"], row["name"], row["keyword"], row["category"], row["sources"], row["active"]) ==         (out["id"], "세이코 SBTQ041", "セイコー SBTQ041", "watch", "ebay", "Y")
+    assert row["must_include"] == "SBTQ041|SBTQ" and row["exclude"] == "ベルト|バンド"
+    assert buying.watch_call("add", ba, search=s, name="", must=None)[0] == 409             # 같은 검색어 → 이미 감시 중
+    assert buying.watch_call("toggle", ba, id=out["id"]) == (200, {"id": out["id"], "active": "N"})
+    assert buying.watch_call("toggle", ba, id="없음")[0] == 404
+
+def test_suggest_must_same_rule_as_buyagent():
+    assert buying.suggest_must({"must_include": ["A1", ""], "keyword": "x SBTR"}) == "A1"
+    assert buying.suggest_must({"keyword": "セイコー SBTR シリーズ SBTQ041 ab1 12"}) == "SBTR|SBTQ041"
+    assert buying.suggest_must({"keyword": "セイコー 腕時計"}) == ""
+
+
+@pytest.mark.skipif(not REAL_WEB.is_file(), reason="buyagent web.py 없음")
+def test_suggest_must_matches_real_buyagent(ba):
+    _copy_buyagent_code(ba)
+    for q in ({"keyword": "セイコー SBTR シリーズ SBTQ041"}, {"must_include": ["X9"], "keyword": "a"}, {"keyword": "abc DEF"}):
+        assert buying.suggest_must(q) == buying.watch_call("suggest", ba, query=q)[1]["must"]
+
+def test_cost_cell_shows_forwarding_and_local_shipping():
+    it = {"cost_krw": 140565, "forwarding_krw": 15000, "shipping_profile": "medium",
+          "best_offer": {"shipping_known": True, "shipping": 0, "currency": "JPY"}}
+    assert buying.cost_cell(it) == '140,565원<div class="small muted">배대지 15,000원 포함 (medium) · 현지배송 무료</div>'
+    it.update(forwarding_krw=0, best_offer={"shipping_known": False})
+    assert "배대지 없음 (직배송) · 현지배송 미확인" in buying.cost_cell(it)
+    it.update(best_offer={"shipping_known": True, "shipping": 550, "currency": "JPY"})
+    assert "현지배송 550 JPY 포함" in buying.cost_cell(it)
+    assert buying.cost_cell({"cost_krw": None}) is not None and "배대지" not in buying.cost_cell({"cost_krw": 5})
+
+
+def test_paused_and_shipping_rate_warnings(ba):
+    (ba / "config").mkdir()
+    (ba / "config" / "settings.toml").write_text(
+        '[origins.JP]\nname = "일본"\n[origins.US]\nname = "미국"\n'
+        '[shipping_checked]\nmax_days = 30\nJP = ""\nUS = "2026-01-01"\nCN = "2099-01-01"\n', encoding="utf-8")
+    html = buying.page()
+    assert "일본 배대지 요금 확인 기록 없음" in html and "미국 배대지 요금 확인한 지 30일 넘음 (마지막 확인 2026-01-01)" in html
+    assert "중국" not in html.split("배대지 요금")[0][-200:] and "CN 배대지" not in html
+    assert "감시 멈춤 중" not in html
+    (ba / "data").mkdir()
+    (ba / "data" / "watch_paused.json").write_text('{"since": "2026-11-19 15:00"}', encoding="utf-8")
+    (ba / "reports").mkdir()
+    (ba / "reports" / "latest.json").write_text(json.dumps({"ok": True, "run_at": "2026-11-01T10:00:00", "markets": [],
+                                                           "items": []}), encoding="utf-8")
+    html = buying.page()
+    assert "⏸ 감시 멈춤 중</b> (2026-11-19 15:00부터)" in html and "그동안 결과가 갱신되지 않는 것은 정상" in html
+    assert "감시 멈춤 중" in buying.nav_item()

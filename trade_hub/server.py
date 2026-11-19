@@ -326,18 +326,16 @@ def buy_watch(conn, body):
     base = buying.buyagent_dir()
     if action not in ("add", "toggle"):
         return 400, {"error": "action은 add 또는 toggle"}
+    if not (Path(base) / "web.py").is_file():
+        return 400, {"error": f"buyagent web.py가 없습니다: {Path(base) / 'web.py'} (buyagent를 최신으로)"}
     with LOCK:
         if any(j["kind"] == "buysearch" and j["status"] == "running" for j in JOBS.values()):
             return 409, {"error": "직접 검색이 실행 중입니다. 끝난 뒤 다시 눌러 주세요."}
-    try:
-        web = buying.watch_api(base)
-    except Exception as err:                          # web.py 없음·불러오기 실패
-        return 400, {"error": str(err) if isinstance(err, RuntimeError) else f"buyagent web.py를 불러오지 못했습니다: {err}"}
     if action == "toggle":
         pid = str(body.get("id") or "").strip()
         if not pid or len(pid) > 100:
             return 400, {"error": "감시 상품 ID가 없습니다."}
-        return web.toggle_watch(Path(base), pid)
+        return buying.watch_call("toggle", base, id=pid)
     data = buying.load()
     if data.get("search_error") or not data.get("search"):
         return 400, {"error": "먼저 직접 검색을 해 주세요."}
@@ -345,7 +343,10 @@ def buy_watch(conn, body):
     if not s.get("ok"):
         return 400, {"error": "실패한 검색은 감시에 추가할 수 없습니다."}
     q = s.get("query") or {}
-    return web.add_watch(Path(base), s, q.get("keyword_original") or "")
+    must = body.get("must")                           # 상품명에 꼭 들어갈 단어 ('|' 구분, 검사는 buyagent parse_must)
+    if must is not None and (not isinstance(must, str) or len(must) > 200):
+        return 400, {"error": "꼭 들어갈 단어 형식이 이상합니다."}
+    return buying.watch_call("add", base, search=s, name=q.get("keyword_original") or "", must=must)
 
 
 # ---------------------------------------------------------------------------

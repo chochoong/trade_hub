@@ -12,6 +12,8 @@
 """
 
 import csv
+import re
+import tomllib
 import json
 import os
 import sqlite3
@@ -53,9 +55,12 @@ def load(base=None):
     """buyagent 폴더에서 화면에 필요한 것만 읽는다. 폴더가 없으면 {'exists': False}."""
     base = Path(base or buyagent_dir())
     out = {"dir": base, "exists": (base / "catalog").is_dir(), "products": [], "prices": [], "latest": None,
-           "latest_error": None, "search": None, "search_error": None, "history": [], "history_count": 0}
+           "latest_error": None, "search": None, "search_error": None, "history": [], "history_count": 0,
+           "paused_since": None, "ship_warnings": []}
     if not out["exists"]:
         return out
+    out["paused_since"] = paused_since(base)
+    out["ship_warnings"] = ship_rate_warnings(base)
     out["products"] = _csv(base / "catalog" / "products.csv")
     out["prices"] = _csv(base / "catalog" / "manual_prices.csv")
     latest = base / "reports" / "latest.json"
@@ -85,27 +90,47 @@ def load(base=None):
     return out
 
 
-_WEB = {}                 # (web.py 경로, 수정 시각) → 불러온 모듈
+# buyagent web.py 함수를 buyagent 폴더에서 따로 띄운 파이썬으로 실행 (web.py가 buyagent의 core 패키지를 쓰므로
+# trade_hub 서버 안으로 불러오지 않음). 입력은 stdin JSON, 결과는 마지막 줄 RESULT_JSON=[코드, 내용]
+WATCH_SCRIPT = """
+import json, sys
+from pathlib import Path
+import web
+a = json.loads(sys.stdin.read())
+base = Path.cwd()
+if a["action"] == "add":
+    r = web.add_watch(base, a["search"], a.get("name") or "", a.get("must"))
+elif a["action"] == "toggle":
+    r = web.toggle_watch(base, a["id"])
+else:
+    r = (200, {"must": web.suggest_must(a["query"])})
+print("RESULT_JSON=" + json.dumps(list(r), ensure_ascii=False))
+"""
+WATCH_TIMEOUT = 30       # 초
+_WATCH_LOCK = __import__("threading").Lock()   # 동시 클릭도 한 번에 하나씩 (products.csv 를 각자 읽고 쓰면 한 줄이 사라질 수 있음)
 
 
-def watch_api(base=None):
-    """buyagent web.py 의 add_watch·toggle_watch (products.csv 열 순서·id 규칙·원자적 쓰기를 buyagent와 똑같이).
-    파일 위치로 불러옴 — buyagent 폴더를 sys.path에 넣지 않아 trade_hub 모듈과 이름이 겹치지 않음."""
-    import importlib.util
-    path = Path(base or buyagent_dir()) / "web.py"
-    if not path.is_file():
-        raise RuntimeError(f"buyagent web.py가 없습니다: {path}")
-    key = (str(path), path.stat().st_mtime_ns)
-    mod = _WEB.get(key)
-    if mod is None:                                   # 같은 모듈을 다시 씀 → web.py 의 CSV_LOCK 하나로 동시 클릭도 차례로
-        spec = importlib.util.spec_from_file_location("buyagent_web", path)
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _WEB.clear()
-        _WEB[key] = mod
-    if not (hasattr(mod, "add_watch") and hasattr(mod, "toggle_watch")):
-        raise RuntimeError("buyagent web.py에 add_watch·toggle_watch가 없습니다 (buyagent를 최신으로)")
-    return mod
+def watch_call(action, base=None, **payload):
+    """buyagent web.py add_watch·toggle_watch(·suggest_must) → (HTTP 코드, dict).
+    products.csv 열 순서·id 규칙·중복 거절·원자적 쓰기가 buyagent 자체 화면과 똑같음."""
+    import subprocess
+    import sys
+    base = Path(base or buyagent_dir())
+    if not (base / "web.py").is_file():
+        raise RuntimeError(f"buyagent web.py가 없습니다: {base / 'web.py'}")
+    try:
+        with _WATCH_LOCK:
+            r = subprocess.run([sys.executable, "-c", WATCH_SCRIPT], cwd=base, input=json.dumps({"action": action, **payload}),
+                               capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=WATCH_TIMEOUT,
+                               env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"buyagent 응답 없음 ({WATCH_TIMEOUT}초)")
+    for line in reversed(r.stdout.splitlines()):
+        if line.startswith("RESULT_JSON="):
+            code, out = json.loads(line.split("=", 1)[1])
+            return int(code), out
+    tail = (r.stderr or r.stdout).strip().splitlines()[-1:] or ["출력 없음"]
+    raise RuntimeError(f"buyagent web.py 실행 실패: {tail[0][:200]}")
 
 
 def is_on(row):
@@ -116,6 +141,75 @@ def watching(products, keyword):
     """같은 검색어(keyword)로 이미 감시 목록에 있는 줄 (buyagent add_watch 중복 기준과 같음)."""
     keyword = (keyword or "").strip()
     return next((p for p in products if keyword and (p.get("keyword") or "").strip() == keyword), None)
+
+
+def paused_since(base):
+    """감시 전체 멈춤이면 멈춘 시각, 아니면 None — buyagent core/pause.py 와 같은 파일·규칙 (data/watch_paused.json).
+    멈춘 동안 buyagent는 latest.json 을 갱신하지 않으므로 run_at 이 오래돼도 오류가 아님."""
+    try:
+        d = json.loads((Path(base) / "data" / "watch_paused.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return str(d.get("since") or "?") if isinstance(d, dict) else "?"
+
+
+def ship_rate_warnings(base, today=None):
+    """배대지 요금표 확인이 필요한 나라 → 문장 (buyagent core/shipping_rates.stale_messages 와 같은 기준). 읽기만 함."""
+    try:
+        with open(Path(base) / "config" / "settings.toml", "rb") as f:
+            cfg = tomllib.load(f)
+    except (OSError, ValueError):
+        return []
+    sec = cfg.get("shipping_checked") or {}
+    try:
+        max_days = int(sec.get("max_days", 30))
+    except (TypeError, ValueError):
+        max_days = 30
+    today = today or date.today()
+    out = []
+    for origin, v in sec.items():
+        if origin == "max_days":
+            continue
+        name = (cfg.get("origins") or {}).get(origin, {}).get("name", origin)
+        try:
+            d = v if isinstance(v, date) else date.fromisoformat(str(v).strip()) if str(v).strip() else None
+        except ValueError:
+            d = None
+        if d is None:
+            out.append(f"{name} 배대지 요금 확인 기록 없음 (지금 값은 추정값)")
+        elif (today - d).days > max_days:
+            out.append(f"{name} 배대지 요금 확인한 지 {max_days}일 넘음 (마지막 확인 {d})")
+    return out
+
+
+def suggest_must(q):
+    """감시 추가 때 '꼭 들어갈 단어' 기본값 — buyagent web.py suggest_must 와 같은 규칙
+    (검색 때 쓴 필수 단어, 없으면 검색어 속 영문 대문자·숫자 코드, 예: SBTR|SBTQ041)"""
+    must = [w for w in q.get("must_include") or [] if w]
+    if not must:
+        must = [w for w in (q.get("keyword") or "").split()
+                if len(w) >= 3 and re.fullmatch(r"[A-Z0-9][A-Z0-9-]*", w) and any(c.isalpha() for c in w)]
+    return "|".join(must)
+
+
+def cost_cell(it):
+    """개당 원가 + 그 안에 들어간 배대지 비용·현지 배송 (buyagent web.py cost_cell 과 같은 문구)"""
+    from trade_hub.dashboard import e, num
+    cost = it.get("cost_krw")
+    if not isinstance(cost, (int, float)):
+        return num(cost, "{:,}원")
+    fwd, prof, parts = it.get("forwarding_krw"), it.get("shipping_profile"), []
+    if isinstance(fwd, (int, float)):
+        parts.append(f"배대지 {fwd:,.0f}원 포함" + (f" ({prof})" if prof else "") if fwd else "배대지 없음 (직배송)")
+    o = it.get("best_offer") or {}
+    if o:
+        if not o.get("shipping_known"):
+            parts.append("현지배송 미확인")
+        elif not o.get("shipping"):
+            parts.append("현지배송 무료")
+        else:
+            parts.append(f"현지배송 {o.get('shipping')} {o.get('currency') or ''} 포함".replace("  ", " "))
+    return f"{cost:,.0f}원" + (f'<div class="small muted">{e(" · ".join(parts))}</div>' if parts else "")
 
 
 def _hub_id(row):
@@ -144,6 +238,8 @@ def nav_item(data=None):
     latest = data["latest"] or {}
     if not data["exists"]:
         state, label = "off", "폴더 없음"
+    elif data.get("paused_since"):
+        state, label = "off", "감시 멈춤 중"
     elif latest:
         state = "ok" if latest.get("ok") else "bad"
         label = ("성공" if latest.get("ok") else "실패") + f' · {(latest.get("run_at") or "")[5:10].replace("-", "/")}'
@@ -182,11 +278,13 @@ def _latest_section(data):
         rows.append([_product_link(it.get("name") or it.get("id"), it.get("hub_product_id")),
                      f'<span class="{cls}">{e(label)}</span>' + (f'<div class="small">{clip(why, 50)}</div>' if why else ""),
                      price or '<span class="muted">–</span>',
-                     num(it.get("cost_krw"), "{:,}원"), *cells,
+                     cost_cell(it), *cells,
                      clip(" / ".join(notes), 60)])
     sub = f'{e((latest.get("run_at") or "")[:16].replace("T", " "))} 실행' + (" · 예시 데이터(--demo)" if latest.get("demo") else "")
     if not latest.get("ok"):
         sub += f' · <span class="bad">실패: {e(latest.get("error") or "")}</span>'
+    if data.get("paused_since"):
+        sub += f' · <b>감시 멈춤 중</b> ({e(data["paused_since"])}부터 — 그동안 결과가 갱신되지 않는 것은 정상)'
     return section("최근 실행 결과", table(["상품", "판정", "최저가 판매처", "개당 원가", *[f"{m} 권장가" for m in markets], "경고·알림"],
                                          rows, "tight") if rows else '<p class="empty">결과 상품 없음</p>', sub)
 
@@ -256,7 +354,7 @@ def _search_section(data):
         rows.append([str(i), f'{shop}<div class="small">{clip(it.get("name"), 70)}</div>',
                      f'{num(o.get("price"), "{:,.0f}" if o.get("currency") in ("JPY", "KRW") else "{:,.2f}")} '
                      f'{e(o.get("currency"))} {ship}',
-                     num(it.get("cost_krw"), "{:,}원"), *cells, clip(" / ".join(it.get("warnings") or []), 60)])
+                     cost_cell(it), *cells, clip(" / ".join(it.get("warnings") or []), 60)])
     ko = q.get("keyword_original")                       # 한글로 검색했으면 buyagent가 번역 → 원래 검색어도 보여 줌
     site = SITE_SHORT.get(q.get("market") or "rakuten", q.get("market"))
     sub = (f'{e(site)} "{e(q.get("keyword") or "")}"' + (f' (← {e(ko)})' if ko else "") + ' · 카테고리'
@@ -271,9 +369,13 @@ def _search_section(data):
             watch = (f'<p class="small">✔ 이미 감시 중 — ID <b>{e(same.get("id"))}</b>'
                      f'{"" if is_on(same) else " (꺼짐 · 아래 감시 상품에서 켜기)"}</p>')
         else:
-            watch = (f'<p><button type="button" class="btn primary" data-buywatch="add" data-name="{e(ko or q.get("keyword"))}">'
-                     '＋ 감시에 추가</button> <span class="small muted">이 검색 조건(검색어·카테고리·사이트·필수/제외 단어)을 '
-                     'catalog/products.csv에 넣어 buyagent 정기 감시(매시간)에 포함</span></p>')
+            watch = (f'<p class="buywatch-add"><button type="button" class="btn primary" data-buywatch="add" '
+                     f'data-name="{e(ko or q.get("keyword"))}">＋ 감시에 추가</button> '
+                     f'<label class="small">꼭 들어갈 단어 <input name="must" value="{e(suggest_must(q))}" maxlength="160" '
+                     'placeholder="예: SBTR|SBTQ041" title="상품명에 꼭 들어가야 할 단어, 여러 개는 | 로 구분 (5개까지). '
+                     '비우면 시곗줄 같은 다른 상품이 최저가로 잡힐 수 있음" style="width:180px"></label> '
+                     '<span class="small muted">이 검색 조건(검색어·카테고리·사이트·제외 단어)을 catalog/products.csv에 넣어 '
+                     'buyagent 정기 감시(매시간)에 포함</span></p>')
     excl = s.get("excluded") or {}
     why = e(", ".join(f"{k}: {v}건" for k, v in excl.items()))
     note = (f'<p class="small muted">걸러낸 결과: {why}</p>' if excl and rows else "")
@@ -348,4 +450,11 @@ def page(data=None):
              f'<ul>{"".join(f"<li>{e(x)}</li>" for x in roles)}</ul><p class="small">{state}</p></div></section>')
     if not data["exists"]:
         return intro
-    return intro + _latest_section(data) + _search_section(data) + _products_section(data) + _prices_section(data) + _history_section(data)
+    notes = ""
+    if data.get("paused_since"):
+        notes += (f'<p class="small"><b>⏸ 감시 멈춤 중</b> ({e(data["paused_since"])}부터) — buyagent 화면에서 다시 시작하면 '
+                  '정기 감시·알림이 돌아옵니다.</p>')
+    if data.get("ship_warnings"):
+        notes += ('<p class="small warn">⚠ ' + " / ".join(e(w) for w in data["ship_warnings"]) +
+                  " → buyagent 화면의 '배대지 요금'에서 확인·저장 (대시보드는 읽기만)</p>")
+    return intro + notes + _latest_section(data) + _search_section(data) + _products_section(data) + _prices_section(data) + _history_section(data)

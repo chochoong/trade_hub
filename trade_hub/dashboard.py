@@ -1096,10 +1096,17 @@ document.addEventListener("submit", function (ev) {   // 검색 → 라쿠텐·�
 document.addEventListener("click", function (ev) {   // 구매대행 감시 목록: [감시에 추가]·[켜기]/[끄기] → products.csv
   var b = ev.target.closest("button[data-buywatch]");
   if (!b) return;
-  var add = b.dataset.buywatch === "add";
-  if (add && !confirm("「" + b.dataset.name + "」 검색 조건을 buyagent 감시 목록(products.csv)에 추가할까요?\\n다음 정기 감시(매시간)부터 가격을 확인합니다.")) return;
+  var add = b.dataset.buywatch === "add", body = {action: "toggle", id: b.dataset.id};
+  if (add) {
+    var mi = b.parentNode.querySelector('input[name="must"]'), must = mi ? mi.value.trim() : "";
+    var msg = "「" + b.dataset.name + "」 검색 조건을 buyagent 감시 목록(products.csv)에 추가할까요?"
+      + (must ? "\\n꼭 들어갈 단어: " + must : "\\n⚠ 꼭 들어갈 단어가 비어 있어 시곗줄 같은 다른 상품이 최저가로 잡힐 수 있습니다.")
+      + "\\n다음 정기 감시(매시간)부터 가격을 확인합니다.";
+    if (!confirm(msg)) return;
+    body = {action: "add", must: must};
+  }
   b.disabled = true;
-  api("/api/buywatch", add ? {action: "add"} : {action: "toggle", id: b.dataset.id})
+  api("/api/buywatch", body)
     .then(function () { location.hash = "#buy"; location.reload(); })
     .catch(function (err) { alert(err.message); b.disabled = false; });
 });

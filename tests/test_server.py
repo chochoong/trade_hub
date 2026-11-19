@@ -271,13 +271,12 @@ def test_buy_watch_api(srv, monkeypatch, tmp_path):
     assert call(srv + "/api/buywatch", {"action": "add"})[0] == 400                          # web.py 없음
     seen = []
 
-    class FakeWeb:
-        def add_watch(self, base_, search, name=""):
-            seen.append(("add", search["query"]["keyword"], name)); return 200, {"id": "x1"}
-
-        def toggle_watch(self, base_, pid):
-            seen.append(("toggle", pid)); return 200, {"id": pid, "active": "N"}
-    monkeypatch.setattr(b, "watch_api", lambda base_=None: FakeWeb())
+    def fake_call(action, base_=None, **kw):
+        if action == "add":
+            seen.append(("add", kw["search"]["query"]["keyword"], kw["name"], kw["must"])); return 200, {"id": "x1"}
+        seen.append(("toggle", kw["id"])); return 200, {"id": kw["id"], "active": "N"}
+    (base / "web.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(b, "watch_call", fake_call)
     code, out = call(srv + "/api/buywatch", {"action": "add"})
     assert code == 400 and "먼저 직접 검색" in out["error"]
     (base / "reports" / "search.json").write_text(json.dumps({"ok": False, "error": "키 없음", "query": {"keyword": "a"}}),
@@ -286,7 +285,9 @@ def test_buy_watch_api(srv, monkeypatch, tmp_path):
     (base / "reports" / "search.json").write_text(json.dumps(
         {"ok": True, "query": {"keyword": "セイコー", "keyword_original": "세이코", "category": "watch"}}), encoding="utf-8")
     assert call(srv + "/api/buywatch", {"action": "add"}) == (200, {"id": "x1"})
+    assert call(srv + "/api/buywatch", {"action": "add", "must": "SBTR|SBTQ041"})[0] == 200
+    assert call(srv + "/api/buywatch", {"action": "add", "must": ["x"]})[0] == 400
     assert call(srv + "/api/buywatch", {"action": "toggle", "id": "x1"})[1]["active"] == "N"
     assert call(srv + "/api/buywatch", {"action": "toggle"})[0] == 400
     assert call(srv + "/api/buywatch", {"action": "rm"})[0] == 400
-    assert seen == [("add", "セイコー", "세이코"), ("toggle", "x1")]
+    assert seen == [("add", "セイコー", "세이코", None), ("add", "セイコー", "세이코", "SBTR|SBTQ041"), ("toggle", "x1")]
