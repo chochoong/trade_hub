@@ -158,11 +158,17 @@ def _latest_section(data):
                                          rows, "tight") if rows else '<p class="empty">결과 상품 없음</p>', sub)
 
 
-LANG_BUTTONS = [   # (언어, 버튼 이름, 설명) — 서버 LANG_MARKET 과 맞춤
-    ("en", "영어", "영어로 번역 → 알리익스프레스 자동 검색"),
-    ("ja", "일본어", "일본어로 번역 → 라쿠텐 자동 검색"),
-    ("zh", "중국어", "중국어로 번역 → 타오바오·1688 검색 링크"),
+LANG_BUTTONS = [   # (언어, 버튼 이름, 설명) — 번역만 함. 검색할 사이트는 사이트 메뉴가 정함
+    ("en", "영어", "영어로 번역 (알리익스프레스·이베이용)"),
+    ("ja", "일본어", "일본어로 번역 (라쿠텐용)"),
+    ("zh", "중국어", "중국어로 번역 (타오바오·1688 링크용)"),
 ]
+# 사이트 메뉴: buyagent main.py SEARCH_MARKETS(--market)와 같은 값. china = 자동 검색 없이 링크만 (trade_hub 안에서 처리)
+BUY_MARKETS = {"rakuten": "라쿠텐(일본·일본어로 검색)", "aliexpress": "알리익스프레스(중국·영어로 검색)",
+               "ebay": "이베이(미국·영어로 검색)"}
+SITE_OPTIONS = [*BUY_MARKETS.items(), ("china", "타오바오·1688(중국어 · 링크만)")]
+SITE_LANG = {"rakuten": "ja", "aliexpress": "en", "ebay": "en", "china": "zh"}   # 언어 버튼 ↔ 사이트 맞춤 (화면 JS)
+SITE_SHORT = {"rakuten": "라쿠텐", "aliexpress": "알리익스프레스", "ebay": "이베이"}
 
 
 def _search_section(data):
@@ -170,25 +176,26 @@ def _search_section(data):
     from trade_hub.dashboard import clip, e, num, section, table, web_link
     from trade_hub.dashboard import SERVER
     if SERVER["on"]:
-        last = (data.get("search") or {}).get("query") or {}
-        opts = "".join(f'<option value="{e(k)}"{" selected" if k == (last.get("category") or "watch") else ""}>{e(n)}</option>'
-                       for k, n in categories(data["dir"]))
+        # 카테고리는 미리 고르지 않음: 배송비·최소 마진이 카테고리마다 달라 잘못 고르면 권장가가 크게 틀림
+        opts = '<option value="">카테고리 선택</option>' + "".join(
+            f'<option value="{e(k)}">{e(n)}</option>' for k, n in categories(data["dir"]))
+        sites = "".join(f'<option value="{k}" data-lang="{SITE_LANG[k]}">{e(n)}</option>' for k, n in SITE_OPTIONS)
         langs = "".join(
-            f'<button type="button" class="buylang{" on" if k == "ja" else ""}" data-lang="{k}" title="{e(t)}">{e(n)}</button>'
+            f'<button type="button" class="buylang" data-lang="{k}" title="{e(t)}">{e(n)}</button>'
             for k, n, t in LANG_BUTTONS)
         how = (f'<form class="buysearch" style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:6px 0">'
-               '<input type="hidden" name="lang" value="ja">'
                '<input name="query" required maxlength="100" autocomplete="off" '
-               'placeholder="검색어 (예: 세이코 SBTQ041) → 언어 버튼을 누르면 번역" style="flex:1;min-width:220px">'
+               'placeholder="검색어 (예: 세이코 SBTQ041)" style="flex:1;min-width:220px">'
                f'<span class="buylangs" style="display:inline-flex;gap:2px">{langs}</span>'
-               f'<select name="category" title="관세율·마진 기준·차단 규칙이 카테고리마다 다릅니다">{opts}</select>'
+               f'<select name="market" title="검색할 사이트 — 한글 검색어는 사이트 언어로 자동 번역">{sites}</select>'
+               f'<select name="category" required title="배송비·최소 마진·관세·차단 규칙이 카테고리마다 다릅니다">{opts}</select>'
                f'<button type="submit">🔎 검색</button></form>'
                '<div class="buylinks small"></div>'
-               '<p class="small muted">언어 버튼을 누르면 한글 검색어를 그 언어로 바꿔 검색창에 넣습니다 (고쳐 써도 됩니다 · 1원 미만). '
-               '<b>일본어</b> = 라쿠텐 자동 검색 (30초~1분) · <b>영어</b> = 알리익스프레스 자동 검색 (buyagent에 API 키 필요) · '
-               '<b>중국어</b> = 타오바오·1688 검색 링크 (자동 검색 없음, 직접 확인). '
-               '모델명(예: SBTQ041)을 넣으면 그 단어가 들어간 상품만 남겨 부속품을 걸러 냅니다. '
-               '감시 목록·가격 이력·알림에는 영향 없습니다.</p>')
+               '<p class="small muted"><b>사이트</b>를 고르고 검색하면 한글 검색어는 그 사이트 언어로 자동 번역됩니다 '
+               '(라쿠텐 30초~1분 · 알리·이베이는 buyagent에 API 키 필요). 언어 버튼은 번역 결과를 미리 보고 고치는 용도입니다 (1원 미만). '
+               '<b>타오바오·1688</b>은 자동 검색이 없어 중국어로 바꾼 검색 링크만 보여 줍니다. '
+               '<b>카테고리</b>는 꼭 맞게 고르세요 — 배송비·최소 마진이 달라 권장가가 크게 바뀝니다. '
+               '모델명(예: SBTQ041)을 넣으면 그 단어가 들어간 상품만 남깁니다. 감시 목록·가격 이력·알림에는 영향 없습니다.</p>')
     else:
         how = ('<p class="small muted">검색창은 <code>trade_hub serve</code>로 열면 보입니다. 또는 buyagent 폴더에서 '
                '<code>python main.py --search "セイコー SBTQ041" --category watch</code></p>')
@@ -218,16 +225,22 @@ def _search_section(data):
                      f'{e(o.get("currency"))} {ship}',
                      num(it.get("cost_krw"), "{:,}원"), *cells, clip(" / ".join(it.get("warnings") or []), 60)])
     ko = q.get("keyword_original")                       # 한글로 검색했으면 buyagent가 번역 → 원래 검색어도 보여 줌
-    site = {"rakuten": "라쿠텐", "aliexpress": "알리익스프레스"}.get(q.get("market") or "rakuten", q.get("market"))
+    site = SITE_SHORT.get(q.get("market") or "rakuten", q.get("market"))
     sub = (f'{e(site)} "{e(q.get("keyword") or "")}"' + (f' (← {e(ko)})' if ko else "") + ' · 카테고리'
            f' {e(q.get("category") or "")} · '
            f'{e((s.get("run_at") or "")[:16].replace("T", " "))} 검색 · 쇼핑몰 결과 {e(s.get("found", 0))}건')
     if not s.get("ok"):
         sub += f' · <span class="bad">실패: {e(s.get("error") or "")}</span>'
     excl = s.get("excluded") or {}
-    note = (f'<p class="small muted">걸러낸 결과: {e(", ".join(f"{k} {v}건" for k, v in excl.items()))}</p>' if excl else "")
-    body = (table(["#", "판매처·상품명", "현지가", "개당 원가", *[f"{m} 권장가" for m in markets], "경고"], rows, "tight")
-            if rows else '<p class="empty">조건에 맞는 재고 있는 판매처 없음</p>')
+    why = e(", ".join(f"{k}: {v}건" for k, v in excl.items()))
+    note = (f'<p class="small muted">걸러낸 결과: {why}</p>' if excl and rows else "")
+    if rows:
+        body = table(["#", "판매처·상품명", "현지가", "개당 원가", *[f"{m} 권장가" for m in markets], "경고"], rows, "tight")
+    elif not s.get("ok") and s.get("error"):         # 예: 알리·이베이 키 없음 → buyagent 문구 그대로
+        body = f'<p class="bad">{e(s["error"])}</p>'
+    else:                                             # 0건 → 어떤 규칙에 몇 건이 걸렸는지 (왜 안 나오는지)
+        body = ('<p class="empty">조건에 맞는 재고 있는 판매처 없음'
+                + (f'<br><span class="small">걸러낸 결과 — {why}</span>' if excl else "") + '</p>')
     return section("직접 검색", how + body + note, sub)
 
 

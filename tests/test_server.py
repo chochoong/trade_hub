@@ -197,6 +197,7 @@ def test_buy_search_passes_korean_and_api_key(srv, monkeypatch, tmp_path):
     wait_job(srv, job["id"])
 
 
+    assert ORIGINAL_JOB_COMMAND("buysearch", ("x", "watch", "ebay"))[0][-1] == "--market=ebay"
 def test_dotenv_value(tmp_path):
     from trade_hub.server import dotenv_value
     f = tmp_path / ".env"
@@ -206,7 +207,7 @@ def test_dotenv_value(tmp_path):
     assert dotenv_value(tmp_path / "없음", "X") is None
 
 
-def test_buy_search_language_picks_market(srv, monkeypatch, tmp_path):
+def test_buy_search_site_picks_market(srv, monkeypatch, tmp_path):
     from trade_hub import server
     base = tmp_path / "ba"
     (base / "config").mkdir(parents=True)
@@ -215,11 +216,15 @@ def test_buy_search_language_picks_market(srv, monkeypatch, tmp_path):
     monkeypatch.setenv("BUYAGENT_DIR", str(base))
     seen = []
     monkeypatch.setattr(server, "job_command", lambda kind, arg: (seen.append(arg), ([sys.executable, "-c", "pass"], tmp_path, 1))[1])
-    code, job = call(srv + "/api/buysearch", {"query": "Seiko watch", "category": "watch", "lang": "en"})
+    code, job = call(srv + "/api/buysearch", {"query": "Seiko watch", "category": "watch", "market": "aliexpress"})
     assert code == 200 and seen[-1] == ("Seiko watch", "watch", "aliexpress") and "알리익스프레스" in job["label"]
     wait_job(srv, job["id"])
-    code, out = call(srv + "/api/buysearch", {"query": "精工", "category": "watch", "lang": "zh"})
-    assert code == 400 and "일본어" in out["error"]                         # 중국어는 자동 검색 없음 (화면은 링크)
+    code, job = call(srv + "/api/buysearch", {"query": "Seiko watch", "category": "watch", "market": "ebay"})
+    assert code == 200 and seen[-1][2] == "ebay" and "이베이" in job["label"]
+    wait_job(srv, job["id"])
+    code, out = call(srv + "/api/buysearch", {"query": "精工", "category": "watch", "market": "china"})
+    assert code == 400 and "라쿠텐·알리익스프레스·이베이" in out["error"]   # 타오바오·1688은 자동 검색 없음 (화면은 링크)
+    assert call(srv + "/api/buysearch", {"query": "x", "category": ""})[0] == 400              # 카테고리 미선택
 
 
 def test_translate_api(srv, monkeypatch):

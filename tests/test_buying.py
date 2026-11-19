@@ -120,7 +120,7 @@ def test_search_results(ba):
     assert "セイコー SBTQ041 &lt;正規品&gt;" in html
     assert "140,565원" in html and "182,900원" in html
     assert 'href="https://item.rakuten.co.jp/a/"' in html
-    assert "상품명 불일치 25건" in html
+    assert "상품명 불일치: 25건" in html
 
 
 def test_search_json_broken(ba):
@@ -140,11 +140,28 @@ def test_search_form_only_in_server_mode(ba):
         html = buying.page()
     finally:
         dashboard.SERVER["on"] = False
-    assert 'form class="buysearch"' in html and '<option value="watch" selected>시계</option>' in html
+    assert 'form class="buysearch"' in html and '<option value="watch">시계</option>' in html and " selected" not in html
+    assert '<option value="">카테고리 선택</option>' in html and 'name="category" required' in html   # 미리 고르지 않음
     assert 'value="food"' not in html
     assert 'name="query" required maxlength="100" autocomplete="off" placeholder' in html   # 새로 고침하면 빈 칸 (value 없음)
     assert html.index('data-lang="en"') < html.index('data-lang="ja"') < html.index('data-lang="zh"')
-    assert 'class="buylang on" data-lang="ja"' in html                                      # 기본은 일본어(라쿠텐)
+    assert html.index('value="rakuten"') < html.index('value="aliexpress"') < html.index('value="ebay"') < html.index('value="china"')
+    assert '<option value="ebay" data-lang="en">이베이(미국·영어로 검색)</option>' in html
+
+
+def test_search_zero_results_show_reason_and_error(ba):
+    (ba / "reports").mkdir()
+    f = ba / "reports" / "search.json"
+    f.write_text(json.dumps({"ok": True, "run_at": "2026-11-19T10:00:00", "found": 30,
+        "query": {"keyword": "watch", "category": "watch", "market": "ebay"},
+        "markets": [], "excluded": {"차단:전자제품": 12}, "items": []}, ensure_ascii=False), encoding="utf-8")
+    html = buying.page()
+    assert '이베이 "watch"' in html and "걸러낸 결과 — 차단:전자제품: 12건" in html
+    f.write_text(json.dumps({"ok": False, "error": "키 없음 → .env 에 EBAY_APP_ID", "run_at": "2026-11-19T10:00:00",
+        "query": {"keyword": "watch", "category": "watch", "market": "ebay"}, "markets": [], "found": 0, "items": []},
+        ensure_ascii=False), encoding="utf-8")
+    html = buying.page()
+    assert '<p class="bad">키 없음 → .env 에 EBAY_APP_ID</p>' in html and "판매처 없음" not in html
 
 
 

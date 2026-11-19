@@ -1063,15 +1063,18 @@ function buyLinks(f, q) {   // 중국 사이트는 자동 검색이 없음 → �
     box.appendChild(a);
   });
 }
-document.addEventListener("click", function (ev) {
+document.addEventListener("click", function (ev) {   // 언어 버튼: 번역 + 사이트가 그 언어가 아니면 맞는 사이트로
   var b = ev.target.closest("button.buylang");
   if (!b) return;
-  var f = b.closest("form.buysearch");
+  var f = b.closest("form.buysearch"), lang = b.dataset.lang, site = f.querySelector('select[name="market"]');
   f.querySelectorAll("button.buylang").forEach(function (x) { x.classList.toggle("on", x === b); });
-  f.querySelector('input[name="lang"]').value = b.dataset.lang;
-  buyTranslate(f, b.dataset.lang).catch(function (err) { alert(err.message); });
+  if (site.options[site.selectedIndex].dataset.lang !== lang) {
+    var o = site.querySelector('option[data-lang="' + lang + '"]');
+    if (o) site.value = o.value;
+  }
+  buyTranslate(f, lang).catch(function (err) { alert(err.message); });
 });
-document.addEventListener("submit", function (ev) {   // 검색 → 일본어·영어: /api/buysearch (buyagent --search --market) · 중국어: 링크
+document.addEventListener("submit", function (ev) {   // 검색 → 라쿠텐·알리·이베이: /api/buysearch (buyagent --market) · 타오바오·1688: 링크
   var f = ev.target.closest("form.buysearch");
   if (!f) return;
   ev.preventDefault();
@@ -1081,7 +1084,7 @@ document.addEventListener("submit", function (ev) {   // 검색 → 일본어·�
   var btn = f.querySelector('button[type="submit"]'), txt = btn.textContent;
   btn.disabled = true; btn.textContent = "검색 준비 중…";
   var done = function () { btn.disabled = false; btn.textContent = txt; };
-  if (body.lang === "zh") {
+  if (body.market === "china") {
     buyTranslate(f, "zh").then(function (q) { buyLinks(f, q); }).catch(function (err) { alert(err.message); }).finally(done);
     return;
   }

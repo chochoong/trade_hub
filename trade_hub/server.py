@@ -100,9 +100,8 @@ def job_command(kind, arg):
 
 KIND_AGENT = {"research": "discover", "sourcing": "sourcing", "neg": "negotiation", "buysearch": "buyagent"}
 BUYSEARCH_TIMEOUT = 5                                   # 분 (라쿠텐 검색 페이지 2장 + 크롬 실행)
-# 직접 검색 언어 → buyagent --market (buyagent main.py SEARCH_MARKETS와 같은 값). 중국어는 자동 검색 사이트가 없어 링크만 보여 줌
-BUY_MARKETS = {"rakuten": "라쿠텐(일본)", "aliexpress": "알리익스프레스"}
-LANG_MARKET = {"ja": "rakuten", "en": "aliexpress"}
+# 직접 검색 사이트 = buyagent --market (buyagent main.py SEARCH_MARKETS와 같은 값). 타오바오·1688은 화면에서 링크만
+BUY_MARKETS = buying.BUY_MARKETS
 
 
 def allowed_roots():
@@ -283,7 +282,7 @@ def buy_search(conn, body):
     q = " ".join(str(body.get("query") or "").split())
     cat = str(body.get("category") or "")
     if not q:
-        return 400, {"error": "검색어를 입력해 주세요. (일본 쇼핑몰 검색어, 예: セイコー SBTQ041)"}
+        return 400, {"error": "검색어를 입력해 주세요. (예: 세이코 SBTQ041)"}
     if len(q) > MAX_QUERY:
         return 400, {"error": f"검색어는 {MAX_QUERY}자 이내로 입력해 주세요."}
     base = Path(buying.buyagent_dir())
@@ -294,15 +293,15 @@ def buy_search(conn, body):
         return 400, {"error": f"buyagent 카테고리 설정을 읽지 못했습니다: {base / 'config' / 'categories.toml'}"}
     if cat not in cats:
         return 400, {"error": "카테고리를 골라 주세요."}
-    market = LANG_MARKET.get(str(body.get("lang") or "ja"))
-    if market is None:
-        return 400, {"error": "자동 검색은 일본어(라쿠텐)·영어(알리익스프레스)만 됩니다."}
+    market = str(body.get("market") or "rakuten")
+    if market not in BUY_MARKETS:
+        return 400, {"error": "자동 검색 사이트는 라쿠텐·알리익스프레스·이베이 중에서 골라 주세요."}
     with LOCK:
         if any(j["kind"] == "buysearch" and j["status"] == "running" for j in JOBS.values()):
             return 409, {"error": "직접 검색이 이미 실행 중입니다. 끝난 뒤 다시 눌러 주세요."}
     # 한글이 남아 있으면 buyagent가 사이트 언어로 바꿔서 찾는다 (실행 로그에 "번역: …", search.json에 keyword_original)
     return 200, job_view(start_job("buysearch", (q, cat, market),
-                                   f"구매대행 검색: {q} ({cats[cat]} · {BUY_MARKETS[market]})", anchor="buy"))
+                                   f"구매대행 검색: {q} ({cats[cat]} · {buying.SITE_SHORT[market]})", anchor="buy"))
 
 
 def buy_translate(conn, body):
