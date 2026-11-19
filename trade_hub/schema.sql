@@ -74,6 +74,8 @@ CREATE TABLE IF NOT EXISTS products (
                                               --   검색으로 찾은 '참고 이미지'는 저장하지 않는다 (화면에만 표시)
     source_country     TEXT,                  -- 추천 공급 국가 (China/Japan = 2번 --country 값). 1번이 추천, 2번 기본값  [v10]
     source_country_reason TEXT,               -- 그 나라를 추천한 이유 (1번)  [v10]
+    source_page_url    TEXT,                  -- 1번이 조사 중 본 해외 구매처 상품 상세 페이지 1개 (알리바바 product-detail,
+                                              --   1688 offer, AliExpress item, 라쿠텐·eBay 상품 등). 2번이 그 판매자를 첫 후보로 검증  [v12]
     notes              TEXT,                  -- 사람이 적는 메모
     created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime')),
     updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime'))

@@ -295,3 +295,11 @@ def test_sourcing_card_shows_discover_summary(conn):
     rest = html[html.index(f'id="prod-{bad}"'):]
     assert 'href="javascript' not in rest and "참고 상품" in rest                     # http(s) 아니면 링크 안 걸음
     assert "후보 이유" not in html                                                    # 후보는 2번 카드가 아님
+
+
+def test_source_page_link_shown(conn):
+    with conn:
+        db.upsert_product(conn, "키캡 세트", ref_url="https://www.coupang.com/vp/products/1",
+                          source_page_url="https://detail.1688.com/offer/123.html")
+    html = dashboard.render(conn)
+    assert 'href="https://detail.1688.com/offer/123.html" target="_blank" rel="noopener noreferrer">해외 판매 페이지</a>' in html

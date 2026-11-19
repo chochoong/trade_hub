@@ -26,7 +26,7 @@ from pathlib import Path
 
 PKG_DIR = Path(__file__).resolve().parent
 SCHEMA_PATH = PKG_DIR / "schema.sql"
-SCHEMA_VERSION = 11  # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
+SCHEMA_VERSION = 12  # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
 # 버전별로 추가된 컬럼: 예전 DB에는 connect() 때 ALTER TABLE로 붙인다 (새 DB는 schema.sql에 이미 있음)
 
 
@@ -54,6 +54,7 @@ MIGRATIONS = {
         ("messages", "external_draft_id", "TEXT")],
     10: [("products", "source_country", "TEXT"), ("products", "source_country_reason", "TEXT")],   # 1번 추천 공급 국가
     11: [],  # compliance_checks 테이블 추가 (3번 통관·규제) — schema.sql의 CREATE TABLE IF NOT EXISTS로 예전 DB에도 생김
+    12: [("products", "source_page_url", "TEXT")],
 }
 PS_UNIQUE_INDEX = ("CREATE UNIQUE INDEX IF NOT EXISTS ux_ps_product_supplier_mode "
                    "ON product_suppliers(product_id, supplier_id, COALESCE(purchase_mode, ''))")
@@ -207,7 +208,7 @@ def agent_run(conn, agent, provider=None, model=None, args=None):
 # ---------------------------------------------------------------------------
 PRODUCT_FIELDS = {"category", "origin", "search_keyword_en", "keywords_ko_json", "reason", "regulations", "risk",
                   "hs_code", "duty_rate", "fta_note", "est_retail_krw", "est_shipping_usd", "notes",
-                  "ref_url", "image_url", "source_country", "source_country_reason"}
+                  "ref_url", "image_url", "source_country", "source_country_reason", "source_page_url"}
 SOURCE_COUNTRIES = {"China": "중국", "Japan": "일본", "USA": "미국"}   # 추천 공급 국가 = 2번이 조사할 수 있는 나라 (2번 --country 값)
 
 
