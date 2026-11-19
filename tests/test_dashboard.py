@@ -196,6 +196,7 @@ def test_suppliers_grouped_by_purchase_mode(conn, tmp_path, monkeypatch):
     assert card.index("AliExpress") < i_s                                    # 구매대행 사이트 순위는 구매대행 묶음에
     assert 'data-mode="retail"' in card and 'data-mode="small_batch"' in card
     assert "구매대행용 다시 찾기" in card and "소량 사입용 다시 찾기" in card
+    assert 'data-mode="oem" data-mode-label="대량 사입·OEM">대량 사입·OEM용 찾기</button>' in card   # 아직 안 찾음 → 강조
     acts = card[card.index('<span class="acts">'):]
     assert acts.index('select class="country"') < acts.index('data-mode="retail"') < acts.index("</span>")   # 같은 묶음
 
@@ -206,6 +207,7 @@ def test_candidate_has_two_mode_buttons(conn, monkeypatch):
         db.upsert_product(conn, "후보")
     html = dashboard.render(conn, server=True)
     assert ">구매대행용 찾기</button>" in html and ">소량 사입용 찾기</button>" in html
+    assert 'data-mode="oem"' not in html                                            # 후보 카드엔 대량 사입·OEM 없음
     assert ('<option value="China">중국</option><option value="Japan">일본</option>'
             '<option value="USA">미국</option>') in html                                   # 추천 없으면 중국(첫 칸)
 

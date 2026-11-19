@@ -69,7 +69,7 @@ def agent_spec(agent):
 
 
 # 대시보드에서 고를 수 있는 2번 구매 방식 (슈퍼바이저 자동 실행은 supervisor.json대로 small_batch만)
-PURCHASE_MODES = {"retail": "구매대행", "small_batch": "소량 사입"}
+PURCHASE_MODES = {"retail": "구매대행", "small_batch": "소량 사입", "oem": "대량 사입·OEM"}
 COUNTRIES = db.SOURCE_COUNTRIES                   # 2번 sourcing_agent --country 값 (기본 China)
 
 
@@ -284,6 +284,8 @@ def select(conn, body):
         return 400, {"error": f"국가는 {', '.join(COUNTRIES)} 중 하나여야 합니다."}
     if row["stage"] not in ("candidate", "sourcing"):
         return 400, {"error": f"#{pid}는 이미 {dashboard.STAGE_LABEL.get(row['stage'], row['stage'])} 단계입니다."}
+    if mode == "oem" and row["stage"] == "candidate":   # 대량은 구매대행·소량으로 검증한 뒤 (2번 공급처 발굴 카드에서만)
+        return 400, {"error": "대량 사입·OEM은 공급처 발굴 단계 품목에서만 찾을 수 있습니다 (소량으로 먼저 검증)."}
     reason = busy_reason(conn, "sourcing")
     if reason:
         return 409, {"error": reason}

@@ -166,8 +166,9 @@ def test_job_command_builds_type_flag(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "agent_spec", lambda agent: (tmp_path, "py", 60))
     assert real("sourcing", (7, "retail"))[0] == ["py", "-m", "sourcing_agent", "from-db", "7", "--type", "retail"]
     assert real("sourcing", 7)[0][-2:] == ["--type", "small_batch"]
+    assert real("sourcing", (7, "oem"))[0][-2:] == ["--type", "oem"]             # 대량 사입·OEM (2번 카드에서만)
     with pytest.raises(ValueError):
-        real("sourcing", (7, "oem"))                                             # 대시보드에서는 retail·small_batch만
+        real("sourcing", (7, "bulk"))
     assert real("sourcing", (7, "retail", "Japan"))[0][-4:] == ["--type", "retail", "--country", "Japan"]
     assert real("sourcing", (7, "retail", "China"))[0][-2:] == ["--country", "China"]   # 고른 나라는 항상 넘김
     assert "--country" not in real("sourcing", (7, "retail"))[0]                # 안 고르면 2번이 1번 추천 국가로
@@ -339,3 +340,17 @@ def test_buy_watch_pause_and_schedule(srv, monkeypatch, tmp_path):
     assert code == 500 and out["error"] == "작업 스케줄러 등록 실패: 액세스 거부"               # buyagent 문구 그대로
     assert call(srv + "/api/buywatch", {"action": "schedule"})[0] == 400
     assert seen == [("pause", {"paused": True}), ("schedule", {"on": True})]
+
+
+def test_select_oem_only_from_sourcing_stage(srv, conn, monkeypatch):
+    seen = []
+    monkeypatch.setattr(server, "start_job", lambda kind, arg, label, **kw: (seen.append((arg, label)), {"id": "1", "label": label})[1])
+    monkeypatch.setattr(server, "job_view", lambda j: j)
+    with conn:
+        cand = db.upsert_product(conn, "후보 품목")
+        src = db.upsert_product(conn, "발굴 중 품목", stage="sourcing")
+    code, out = call(srv + "/api/select", {"product_id": cand, "mode": "oem"})
+    assert code == 400 and "공급처 발굴 단계" in out["error"]
+    assert conn.execute("SELECT stage FROM products WHERE id = ?", (cand,)).fetchone()[0] == "candidate"   # 단계 그대로
+    code, out = call(srv + "/api/select", {"product_id": src, "mode": "oem"})
+    assert code == 200 and seen[-1][0] == (src, "oem", "China") and "대량 사입·OEM용 공급처 찾기" in seen[-1][1]

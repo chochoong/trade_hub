@@ -261,7 +261,8 @@ def candidate_rows(conn):
     return table(heads + (["작업"] if SERVER["on"] else []), out), len(rows)
 
 
-MODE_BUTTONS = (("retail", "구매대행"), ("small_batch", "소량 사입"))
+MODE_BUTTONS = (("retail", "구매대행"), ("small_batch", "소량 사입"))           # 1번 후보 카드
+SOURCING_BUTTONS = MODE_BUTTONS + (("oem", "대량 사입·OEM"),)                 # 2번 공급처 발굴 카드 (소량 검증 후 대량)
 COUNTRIES = tuple(db.SOURCE_COUNTRIES.items())          # 2번 sourcing_agent --country 값
 
 
@@ -300,7 +301,7 @@ def sourcing_button(p, modes_found):
     return ' <span class="acts">' + country_select(p) + "".join(
         f'<button type="button" class="btn{"" if mode in modes_found else " primary"}" data-act="select" data-id="{p["id"]}" '
         f'data-name="{name}" data-mode="{mode}" data-mode-label="{label}">{label}용 {"다시 " if mode in modes_found else ""}찾기</button>'
-        for mode, label in MODE_BUTTONS) + "</span>"
+        for mode, label in SOURCING_BUTTONS) + "</span>"
 
 
 def product_index(conn):
@@ -319,7 +320,7 @@ def product_index(conn):
 
 
 # 공급처 목록을 나눌 구매 방식 (product_suppliers.purchase_mode). 대시보드 버튼은 retail·small_batch만 실행
-PURCHASE_GROUPS = [("retail", "구매대행"), ("small_batch", "소량 사입"), ("oem", "OEM"), (None, "구매 방식 미기록")]
+PURCHASE_GROUPS = [("retail", "구매대행"), ("small_batch", "소량 사입"), ("oem", "대량 사입·OEM"), (None, "구매 방식 미기록")]
 SUPPLIER_HEADS = ["", "공급처", "신뢰도·점수", "상태", "MOQ", "단가", "연락처", "위험 요소"]
 
 
