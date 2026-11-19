@@ -26,7 +26,7 @@ from pathlib import Path
 
 PKG_DIR = Path(__file__).resolve().parent
 SCHEMA_PATH = PKG_DIR / "schema.sql"
-SCHEMA_VERSION = 10  # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
+SCHEMA_VERSION = 11  # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
 # 버전별로 추가된 컬럼: 예전 DB에는 connect() 때 ALTER TABLE로 붙인다 (새 DB는 schema.sql에 이미 있음)
 
 
@@ -53,6 +53,7 @@ MIGRATIONS = {
     9: [("messages", "external_id", "TEXT"), ("messages", "external_thread_id", "TEXT"),   # 5번 Gmail 연동
         ("messages", "external_draft_id", "TEXT")],
     10: [("products", "source_country", "TEXT"), ("products", "source_country_reason", "TEXT")],   # 1번 추천 공급 국가
+    11: [],  # compliance_checks 테이블 추가 (3번 통관·규제) — schema.sql의 CREATE TABLE IF NOT EXISTS로 예전 DB에도 생김
 }
 PS_UNIQUE_INDEX = ("CREATE UNIQUE INDEX IF NOT EXISTS ux_ps_product_supplier_mode "
                    "ON product_suppliers(product_id, supplier_id, COALESCE(purchase_mode, ''))")
@@ -315,6 +316,40 @@ def latest_channels(conn, product_id, purchase_mode=None):
         return []
     return conn.execute("SELECT * FROM product_channels WHERE product_id = ? AND run_id IS ? ORDER BY rank, id",
                         (product_id, last["run_id"])).fetchall()
+
+
+# ---------------------------------------------------------------------------
+# 통관·규제 체크 (3번 compliance 에이전트가 쓴다)
+# ---------------------------------------------------------------------------
+COMPLIANCE_VERDICTS = {"go": "진행", "conditional": "조건부 진행", "hold": "보류"}
+COMPLIANCE_LIST_FIELDS = ("verdict_reasons", "hs_candidates", "required_certs", "possible_rules", "factory_requests",
+                          "labeling", "contract_clauses", "broker_questions", "unknown_flags", "warnings")
+
+
+def save_compliance_check(conn, product_id, run_id, verdict, checked_on, flags=None, used_llm=False,
+                          report_path=None, **lists):
+    """통관·규제 판정 1건을 남긴다 (실행마다 새 행 → 이력 유지). 새 행 id를 돌려준다.
+    verdict: go / conditional / hold (한국어 '진행'·'조건부 진행'·'보류'도 받음)
+    lists: COMPLIANCE_LIST_FIELDS의 이름 (verdict_reasons=[...], hs_candidates=[...] ...) → *_json 칸에 저장"""
+    verdict = {v: k for k, v in COMPLIANCE_VERDICTS.items()}.get(verdict, verdict)
+    if verdict not in COMPLIANCE_VERDICTS:
+        raise ValueError(f"알 수 없는 판정: {verdict!r} (가능: {', '.join(COMPLIANCE_VERDICTS)})")
+    unknown = set(lists) - set(COMPLIANCE_LIST_FIELDS)
+    if unknown:
+        raise ValueError(f"알 수 없는 통관·규제 필드: {unknown}")
+    if conn.execute("SELECT 1 FROM products WHERE id = ?", (product_id,)).fetchone() is None:
+        raise ValueError(f"품목 번호 {product_id}가 없습니다")
+    cols = {"product_id": product_id, "run_id": run_id, "verdict": verdict, "checked_on": str(checked_on),
+            "flags_json": dumps(flags), "used_llm": int(bool(used_llm)), "report_path": report_path,
+            **{f"{k}_json": dumps(v) for k, v in lists.items()}}
+    return conn.execute(f"INSERT INTO compliance_checks ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                        tuple(cols.values())).lastrowid
+
+
+def latest_compliance_check(conn, product_id):
+    """품목의 가장 최근 통관·규제 판정 (없으면 None)."""
+    return conn.execute("SELECT * FROM compliance_checks WHERE product_id = ? ORDER BY id DESC LIMIT 1",
+                        (product_id,)).fetchone()
 
 
 # MOQ 판단 기준: max_order_qty가 비어 있으면 구매 방식 기본값 (oem = 제한 없음), 구매 방식도 모르면 50

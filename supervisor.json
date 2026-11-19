@@ -35,9 +35,10 @@
     },
     "compliance": {
       "enabled": false,
-      "command": ["{python}", "compliance_agent.py"],
+      "command": ["C:/workspace/compliance_agent/.venv/Scripts/python.exe", "-m", "compliance_agent", "check-hub"],
       "cwd": "../compliance_agent",
-      "when_sql": "SELECT COUNT(*) FROM products WHERE stage IN ('sourcing', 'negotiating') AND hs_code IS NULL",
+      "_when": "공급처 발굴·협상 단계인데 통관·규제 판정(compliance_checks)이 아직 없는 품목. compliance_agent/compliance_agent/hub.py PENDING_SQL과 같은 조건 — 바꾸면 같이 바꿀 것",
+      "when_sql": "SELECT COUNT(*) FROM products p WHERE p.stage IN ('sourcing', 'negotiating') AND NOT EXISTS (SELECT 1 FROM compliance_checks c WHERE c.product_id = p.id)",
       "min_interval_hours": 12,
       "timeout_minutes": 30
     },

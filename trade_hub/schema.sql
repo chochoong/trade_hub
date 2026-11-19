@@ -4,7 +4,8 @@
 -- 에이전트 (agent_runs.agent 값)
 --  discover    1. 시장조사·아이템 발굴      → products(candidate), product_scores
 --  sourcing    2. 공급처 발굴              → suppliers, product_suppliers
---  compliance  3. 통관·규제 체크            → products.hs_code·duty_rate·fta_note·regulations (발주 전: 인증·표시는 생산 때 해결)
+--  compliance  3. 통관·규제 체크            → compliance_checks, tasks(decision: 보류 판정)
+--                                          (products.hs_code·duty_rate·fta_note는 관세사 확인 후 사람이 입력 — 에이전트는 후보만)
 --  costing     4. 원가·수익 계산            → product_suppliers.est_landed_krw·est_margin_pct
 --  negotiation 5. 커뮤니케이션·협상         → messages(초안), quotes
 --  documents   6. 무역서류                 → (PI·CI·PL·계약서 초안: 파일 경로를 tasks/notes에)
@@ -345,6 +346,30 @@ CREATE TABLE IF NOT EXISTS product_channels (
     created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime'))
 );
 
+-- 통관·규제 체크 결과 (3번): 실행마다 품목별 1행 → 최신 행이 현재 판정. 규칙 엔진 판정이며 HS코드는 '후보'만  [v11]
+--  판정은 발주 전 점검용 초안. HS코드·세율 확정은 관세사 확인 후 사람이 products.hs_code·duty_rate에 입력한다.
+CREATE TABLE IF NOT EXISTS compliance_checks (
+    id                     INTEGER PRIMARY KEY,
+    product_id             INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    run_id                 INTEGER REFERENCES agent_runs(id),
+    verdict                TEXT NOT NULL CHECK (verdict IN ('go', 'conditional', 'hold')),   -- 진행 / 조건부 진행 / 보류
+    verdict_reasons_json   TEXT CHECK (verdict_reasons_json IS NULL OR json_valid(verdict_reasons_json)),    -- ["...", ...]
+    hs_candidates_json     TEXT CHECK (hs_candidates_json IS NULL OR json_valid(hs_candidates_json)),        -- [{"code","description","reason"}]
+    required_certs_json    TEXT CHECK (required_certs_json IS NULL OR json_valid(required_certs_json)),      -- [{"id","title","timing"}] 인증·요건 (공통 요건 제외)
+    possible_rules_json    TEXT CHECK (possible_rules_json IS NULL OR json_valid(possible_rules_json)),      -- 정보 부족으로 판단 못 한 요건 [{"id","title","missing_flags"}]
+    factory_requests_json  TEXT CHECK (factory_requests_json IS NULL OR json_valid(factory_requests_json)),  -- 공장에 요청할 서류·시안
+    labeling_json          TEXT CHECK (labeling_json IS NULL OR json_valid(labeling_json)),                  -- 제품·포장 표시사항
+    contract_clauses_json  TEXT CHECK (contract_clauses_json IS NULL OR json_valid(contract_clauses_json)),  -- 계약서·PI 조건 (6번 무역서류가 읽음)
+    broker_questions_json  TEXT CHECK (broker_questions_json IS NULL OR json_valid(broker_questions_json)),  -- 관세사에게 물을 것
+    flags_json             TEXT CHECK (flags_json IS NULL OR json_valid(flags_json)),                        -- 판정에 쓴 제품 특성 플래그
+    unknown_flags_json     TEXT CHECK (unknown_flags_json IS NULL OR json_valid(unknown_flags_json)),        -- 아직 모르는 플래그 이름
+    warnings_json          TEXT CHECK (warnings_json IS NULL OR json_valid(warnings_json)),                  -- 규칙 표 경고 (미검증·재확인 필요)
+    used_llm               INTEGER NOT NULL DEFAULT 0 CHECK (used_llm IN (0, 1)),                             -- LLM 분류로 플래그·HS 후보를 채웠는가
+    report_path            TEXT,                  -- 사람이 읽는 보고서(.md) 경로
+    checked_on             TEXT NOT NULL,         -- 판정 기준일 (YYYY-MM-DD)
+    created_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime'))
+);
+
 -- 슈퍼바이저 스케줄러가 다른 에이전트를 실행한 기록 (supervisor.json의 명령을 subprocess로 실행)
 CREATE TABLE IF NOT EXISTS supervisor_dispatches (
     id           INTEGER PRIMARY KEY,
@@ -376,6 +401,7 @@ CREATE INDEX IF NOT EXISTS idx_events_product        ON product_events(product_i
 CREATE INDEX IF NOT EXISTS idx_scores_product        ON product_scores(product_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_ps_product            ON product_suppliers(product_id, status);
 CREATE INDEX IF NOT EXISTS idx_channels_product      ON product_channels(product_id, run_id, rank);
+CREATE INDEX IF NOT EXISTS idx_compliance_product    ON compliance_checks(product_id, id);
 CREATE INDEX IF NOT EXISTS idx_messages_ps           ON messages(product_supplier_id, status);
 CREATE INDEX IF NOT EXISTS idx_quotes_ps             ON quotes(product_supplier_id);
 CREATE INDEX IF NOT EXISTS idx_shipments_status      ON shipments(status);

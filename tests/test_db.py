@@ -371,3 +371,45 @@ def test_v9_adds_gmail_columns_to_old_db(tmp_path):
         with conn:
             conn.execute("INSERT INTO messages (product_supplier_id, direction, body, status, external_id)"
                          " VALUES (?, 'inbound', 'hi', 'received', 'g1')", (ps,))
+
+
+# --- v11: 3번 통관·규제 판정 ---------------------------------------------------------------
+def test_save_compliance_check_keeps_history_and_accepts_korean_verdict(conn):
+    import json
+    with conn:
+        pid = db.upsert_product(conn, "요가매트", stage="sourcing")
+        first = db.save_compliance_check(conn, pid, None, "보류", "2026-11-19", flags={"wireless": None},
+                                         verdict_reasons=["정보 부족"], hs_candidates=[{"code": "9506.91"}])
+        second = db.save_compliance_check(conn, pid, None, "conditional", "2026-11-20", used_llm=True,
+                                          contract_clauses=["원산지 표시"])
+    assert second > first
+    latest = db.latest_compliance_check(conn, pid)
+    assert latest["id"] == second and latest["verdict"] == "conditional" and latest["used_llm"] == 1
+    assert json.loads(latest["contract_clauses_json"]) == ["원산지 표시"]
+    old = conn.execute("SELECT * FROM compliance_checks WHERE id = ?", (first,)).fetchone()
+    assert old["verdict"] == "hold" and json.loads(old["hs_candidates_json"])[0]["code"] == "9506.91"
+    assert db.latest_compliance_check(conn, 999) is None
+
+
+def test_save_compliance_check_rejects_bad_input(conn):
+    with conn:
+        pid = db.upsert_product(conn, "요가매트")
+    with pytest.raises(ValueError):
+        db.save_compliance_check(conn, pid, None, "maybe", "2026-11-19")
+    with pytest.raises(ValueError):
+        db.save_compliance_check(conn, pid, None, "go", "2026-11-19", hs_code="1234")
+    with pytest.raises(ValueError):
+        db.save_compliance_check(conn, 999, None, "go", "2026-11-19")
+
+
+def test_compliance_checks_table_created_on_v10_db(tmp_path):
+    import sqlite3
+    path = tmp_path / "old.db"
+    db.connect(path).close()
+    old = sqlite3.connect(path)
+    old.executescript("DROP TABLE compliance_checks; PRAGMA user_version = 10;")
+    old.close()
+    conn = db.connect(path)
+    assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'compliance_checks'").fetchone()
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+    conn.close()
