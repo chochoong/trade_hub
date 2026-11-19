@@ -4,10 +4,10 @@
 -- 에이전트 (agent_runs.agent 값)
 --  discover    1. 시장조사·아이템 발굴      → products(candidate), product_scores
 --  sourcing    2. 공급처 발굴              → suppliers, product_suppliers
---  compliance  3. 통관·규제 체크            → compliance_checks, tasks(decision: 보류 판정)
+--  compliance  3. 통관·규제 체크            → compliance_checks(supplier_questions 포함), tasks(decision: 보류 판정)
 --                                          (products.hs_code·duty_rate·fta_note는 관세사 확인 후 사람이 입력 — 에이전트는 후보만)
 --  costing     4. 원가·수익 계산            → product_suppliers.est_landed_krw·est_margin_pct
---  negotiation 5. 커뮤니케이션·협상         → messages(초안), quotes
+--  negotiation 5. 커뮤니케이션·협상         → messages(초안), quotes, product_suppliers.supplier_specs_json
 --  documents   6. 무역서류                 → (PI·CI·PL·계약서 초안: 파일 경로를 tasks/notes에)
 --  sales       7. 판매·마케팅              → sales
 --  finance     8. 재무·관리                → orders, shipments, ledger_entries
@@ -169,6 +169,9 @@ CREATE TABLE IF NOT EXISTS product_suppliers (
                                               --   cosmetic, synthetic_resin_household, textile_wearable, origin_country
                                               --   (상표·어린이 대상·의료 효과는 3번 정책이 정하므로 넣지 않음)
                                               --   값: false = 페이지에서 '해당 없음'을 확인함, 모르면 null
+    supplier_specs_json   TEXT CHECK (supplier_specs_json IS NULL OR json_valid(supplier_specs_json)),  -- 공급처가 답한 사양 (5번이 쓰고 3번이 읽음)  [v14]
+                                              --   specs_json과 같은 형식, 근거는 URL 대신 메일 번호 {"claim","message_id"} + "updated_at"
+                                              --   2번이 다시 조사하면 specs_json을 덮어쓰므로 칸을 따로 둠. 쓰기는 db.merge_supplier_specs로
     reject_reason    TEXT,
     updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime'))
     -- 한 줄 = (품목, 공급처, 구매 방식) [v8]. 같은 업체가 retail·small_batch 양쪽에 나와도 따로 남는다.
@@ -374,6 +377,8 @@ CREATE TABLE IF NOT EXISTS compliance_checks (
     flags_json             TEXT CHECK (flags_json IS NULL OR json_valid(flags_json)),                        -- 판정에 쓴 제품 특성 플래그
     unknown_flags_json     TEXT CHECK (unknown_flags_json IS NULL OR json_valid(unknown_flags_json)),        -- 아직 모르는 플래그 이름
     warnings_json          TEXT CHECK (warnings_json IS NULL OR json_valid(warnings_json)),                  -- 규칙 표 경고 (미검증·재확인 필요)
+    supplier_questions_json TEXT CHECK (supplier_questions_json IS NULL OR json_valid(supplier_questions_json)),  -- 5번이 공급처에게 물을 사양 질문 [v14]
+                                                  --   [{"flag": "chemical_product", "question_ko": "..."}] — '모름'으로 남은 사실 항목만 (정책 항목 제외)
     used_llm               INTEGER NOT NULL DEFAULT 0 CHECK (used_llm IN (0, 1)),                             -- LLM 분류로 플래그·HS 후보를 채웠는가
     report_path            TEXT,                  -- 사람이 읽는 보고서(.md) 경로
     checked_on             TEXT NOT NULL,         -- 판정 기준일 (YYYY-MM-DD)

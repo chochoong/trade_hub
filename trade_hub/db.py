@@ -26,7 +26,7 @@ from pathlib import Path
 
 PKG_DIR = Path(__file__).resolve().parent
 SCHEMA_PATH = PKG_DIR / "schema.sql"
-SCHEMA_VERSION = 13  # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
+SCHEMA_VERSION = 14  # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
 # 버전별로 추가된 컬럼: 예전 DB에는 connect() 때 ALTER TABLE로 붙인다 (새 DB는 schema.sql에 이미 있음)
 
 
@@ -54,8 +54,10 @@ MIGRATIONS = {
         ("messages", "external_draft_id", "TEXT")],
     10: [("products", "source_country", "TEXT"), ("products", "source_country_reason", "TEXT")],   # 1번 추천 공급 국가
     11: [],  # compliance_checks 테이블 추가 (3번 통관·규제) — schema.sql의 CREATE TABLE IF NOT EXISTS로 예전 DB에도 생김
-    12: [("products", "source_page_url", "TEXT")],
-    13: [("product_suppliers", "specs_json", "TEXT")],   # 2번이 판매 페이지에서 읽은 제품 사양 → 3번 통관·규제가 읽음   # 1번이 조사 중 본 해외 구매처 상품 상세 페이지 → 2번 첫 후보
+    12: [("products", "source_page_url", "TEXT")],   # 1번이 조사 중 본 해외 구매처 상품 상세 페이지 → 2번 첫 후보
+    13: [("product_suppliers", "specs_json", "TEXT")],   # 2번이 판매 페이지에서 읽은 제품 사양 → 3번 통관·규제가 읽음
+    14: [("compliance_checks", "supplier_questions_json", "TEXT"),   # 3번 → 5번: 공급처에게 물을 사양 질문
+         ("product_suppliers", "supplier_specs_json", "TEXT")],      # 5번 → 3번: 공급처가 답한 사양 (merge_supplier_specs)
 }
 PS_UNIQUE_INDEX = ("CREATE UNIQUE INDEX IF NOT EXISTS ux_ps_product_supplier_mode "
                    "ON product_suppliers(product_id, supplier_id, COALESCE(purchase_mode, ''))")
@@ -326,7 +328,8 @@ def latest_channels(conn, product_id, purchase_mode=None):
 # ---------------------------------------------------------------------------
 COMPLIANCE_VERDICTS = {"go": "진행", "conditional": "조건부 진행", "hold": "보류"}
 COMPLIANCE_LIST_FIELDS = ("verdict_reasons", "hs_candidates", "required_certs", "possible_rules", "factory_requests",
-                          "labeling", "contract_clauses", "broker_questions", "unknown_flags", "warnings")
+                          "labeling", "contract_clauses", "broker_questions", "unknown_flags", "warnings",
+                          "supplier_questions")   # v14: [{"flag", "question_ko"}] — 5번이 공급처에게 물음
 
 
 def save_compliance_check(conn, product_id, run_id, verdict, checked_on, flags=None, used_llm=False,
@@ -353,6 +356,58 @@ def latest_compliance_check(conn, product_id):
     """품목의 가장 최근 통관·규제 판정 (없으면 None)."""
     return conn.execute("SELECT * FROM compliance_checks WHERE product_id = ? ORDER BY id DESC LIMIT 1",
                         (product_id,)).fetchone()
+
+
+# 제품 사양 사실 항목 (compliance_agent/compliance_agent/flags.py FLAGS 중 사실 항목만 — 바꾸면 같이 바꿀 것).
+# 상표·라이선스·어린이 대상·캐릭터 디자인·의료 효과는 3번 정책이 정하므로 사양으로 받지 않는다.
+SPEC_FLAG_KEYS = {
+    "power_source": ("none", "ac", "usb", "battery_lithium", "battery_other"),
+    "is_electronic": bool, "has_heating_or_motor": bool, "wireless": bool, "food_contact": bool,
+    "chemical_product": bool, "hygiene_product": bool, "cosmetic": bool, "synthetic_resin_household": bool,
+    "textile_wearable": bool, "origin_country": str,
+}
+
+
+def _spec_value_ok(key, value):
+    rule = SPEC_FLAG_KEYS.get(key)
+    if rule is None or value is None:
+        return False
+    if rule is bool:
+        return isinstance(value, bool)
+    if rule is str:
+        return isinstance(value, str) and 0 < len(value.strip()) <= 10
+    return value in rule
+
+
+def merge_supplier_specs(conn, ps_id, flags, evidence, materials=None):
+    """공급처가 답장으로 알려 준 사양을 product_suppliers.supplier_specs_json에 합친다 (5번이 쓰고 3번이 읽음).
+    - flags: 사실 항목(SPEC_FLAG_KEYS)만, 값 형식이 맞는 것만. 새로 확인된 값만 덮어쓰고 null은 기존 값을 지우지 않음
+    - evidence: [{"claim": "...", "message_id": 123}] 누적 (같은 항목은 한 번만)
+    - materials: 누적 (중복 제거)
+    - updated_at: 합친 시각 — 3번이 '최신 판정 이후 공급처 답이 바뀌었나'를 볼 때 씀
+    합친 결과(dict)를 돌려준다. 받은 값 중 쓸 게 없으면 저장하지 않고 기존 값을 돌려준다."""
+    row = conn.execute("SELECT supplier_specs_json FROM product_suppliers WHERE id = ?", (ps_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"품목-공급처 연결 번호 {ps_id}가 없습니다")
+    try:
+        cur = json.loads(row["supplier_specs_json"]) if row["supplier_specs_json"] else {}
+    except ValueError:
+        cur = {}
+    cur = cur if isinstance(cur, dict) else {}
+    old_flags = cur.get("flags") if isinstance(cur.get("flags"), dict) else {}
+    old_ev = cur.get("evidence") if isinstance(cur.get("evidence"), list) else []
+    old_mat = cur.get("materials") if isinstance(cur.get("materials"), list) else []
+    new_flags = {k: v for k, v in (flags or {}).items() if _spec_value_ok(k, v)}
+    new_ev = [e for e in (evidence or []) if isinstance(e, dict) and str(e.get("claim") or "").strip() and e not in old_ev]
+    new_mat = [str(m).strip() for m in (materials or []) if str(m).strip() and str(m).strip() not in old_mat]
+    new_flags = {k: v for k, v in new_flags.items() if old_flags.get(k) != v}
+    if not (new_flags or new_ev or new_mat):
+        return cur
+    merged = {"flags": {**old_flags, **new_flags}, "materials": old_mat + list(dict.fromkeys(new_mat)),
+              "evidence": old_ev + new_ev, "updated_at": now()}
+    conn.execute("UPDATE product_suppliers SET supplier_specs_json = ?, updated_at = ? WHERE id = ?",
+                 (dumps(merged), now(), ps_id))
+    return merged
 
 
 # MOQ 판단 기준: max_order_qty가 비어 있으면 구매 방식 기본값 (oem = 제한 없음), 구매 방식도 모르면 50

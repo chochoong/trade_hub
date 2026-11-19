@@ -437,3 +437,62 @@ def test_v13_specs_json_on_product_suppliers(tmp_path, conn):
     with pytest.raises(sqlite3.IntegrityError):
         with conn:
             conn.execute("UPDATE product_suppliers SET specs_json = '{깨진' WHERE id = ?", (lid,))
+
+
+def test_v14_supplier_questions_and_specs(tmp_path, conn):
+    import sqlite3
+    path = tmp_path / "old.db"
+    db.connect(path).close()
+    old = sqlite3.connect(path)
+    old.executescript("ALTER TABLE compliance_checks DROP COLUMN supplier_questions_json;"
+                      "ALTER TABLE product_suppliers DROP COLUMN supplier_specs_json; PRAGMA user_version = 13;")
+    old.close()
+    c = db.connect(path)
+    assert "supplier_questions_json" in {r["name"] for r in c.execute("PRAGMA table_info(compliance_checks)")}
+    assert "supplier_specs_json" in {r["name"] for r in c.execute("PRAGMA table_info(product_suppliers)")}
+    c.close()
+    q = [{"flag": "chemical_product", "question_ko": "별도 접착제가 동봉되나요?"}]
+    with conn:
+        pid = db.upsert_product(conn, "벽선반", stage="sourcing")
+        cid = db.save_compliance_check(conn, pid, None, "hold", "2026-11-19", supplier_questions=q)
+    assert json.loads(conn.execute("SELECT supplier_questions_json FROM compliance_checks WHERE id = ?",
+                                   (cid,)).fetchone()[0]) == q
+
+
+def test_merge_supplier_specs(conn):
+    with conn:
+        pid = db.upsert_product(conn, "벽선반", stage="sourcing")
+        ps = db.link_supplier(conn, pid, db.upsert_supplier(conn, "Shelf Co", "China"), specs_json={"flags": {"wireless": False}})
+        out = db.merge_supplier_specs(conn, ps, {"chemical_product": False, "power_source": "battery_lithium",
+                                                 "food_contact": None, "children_target": True,      # 정책 항목 → 버림
+                                                 "wireless": "no", "origin_country": "CN"},          # 형식 틀림 → 버림
+                                      [{"claim": "별도 접착제 없음, 3M 테이프 부착", "message_id": 12}], ["ABS"])
+    assert out["flags"] == {"chemical_product": False, "power_source": "battery_lithium", "origin_country": "CN"}
+    assert out["materials"] == ["ABS"] and out["evidence"] == [{"claim": "별도 접착제 없음, 3M 테이프 부착", "message_id": 12}]
+    first = out["updated_at"]
+    with conn:
+        out = db.merge_supplier_specs(conn, ps, {"chemical_product": None, "is_electronic": False},   # null은 안 지움
+                                      [{"claim": "전자회로 없음", "message_id": 15},
+                                       {"claim": "별도 접착제 없음, 3M 테이프 부착", "message_id": 12}], ["ABS", "철"])
+    assert out["flags"] == {"chemical_product": False, "power_source": "battery_lithium", "origin_country": "CN",
+                            "is_electronic": False}
+    assert [e["message_id"] for e in out["evidence"]] == [12, 15] and out["materials"] == ["ABS", "철"]
+    row = conn.execute("SELECT specs_json, supplier_specs_json FROM product_suppliers WHERE id = ?", (ps,)).fetchone()
+    assert json.loads(row["specs_json"]) == {"flags": {"wireless": False}}          # 2번 칸은 그대로
+    assert json.loads(row["supplier_specs_json"]) == out and out["updated_at"] >= first
+    with conn:                                                                       # 바뀐 게 없으면 저장 안 함
+        assert db.merge_supplier_specs(conn, ps, {"is_electronic": False}, [], None) == out
+    with pytest.raises(ValueError):
+        db.merge_supplier_specs(conn, 9999, {}, [])
+
+
+def test_spec_flag_keys_match_compliance_agent():
+    from pathlib import Path
+    flags_py = db.PKG_DIR.parent.parent / "compliance_agent" / "compliance_agent" / "flags.py"
+    if not flags_py.is_file():
+        pytest.skip("compliance_agent 없음")
+    ns = {}
+    exec(flags_py.read_text(encoding="utf-8"), ns)
+    policy = {"children_target", "has_character_or_cute_design", "medical_claim", "brand_or_character", "licensed"}
+    assert set(db.SPEC_FLAG_KEYS) == set(ns["FLAGS"]) - policy
+    assert tuple(ns["FLAGS"]["power_source"]["values"]) == db.SPEC_FLAG_KEYS["power_source"]
