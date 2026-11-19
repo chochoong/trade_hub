@@ -273,3 +273,25 @@ def test_compliance_page_shows_latest_check(conn, tmp_path):
         conn.execute("UPDATE products SET hs_code = '8516.71' WHERE id = ?", (pid,))
     row = dashboard.compliance_rows(conn)
     assert "8516.71" in row and "확정" in row and "8516.79" not in row               # 사람이 확정한 HS 코드가 우선
+
+
+def test_sourcing_card_shows_discover_summary(conn):
+    with conn:
+        pid = db.upsert_product(conn, "빈티지 카메라", stage="sourcing", reason="수요 증가 <급등> · 도매 $30~40",
+                                regulations="전파인증 필요", risk="중고 품질 편차", est_retail_krw=189000,
+                                source_country="Japan", source_country_reason="일본 중고 시장이 큼",
+                                ref_url="https://example.com/item?a=1&b=2")
+        conn.execute("INSERT INTO product_scores (product_id, total, est_fob_usd) VALUES (?, 60, 20)", (pid,))
+        conn.execute("INSERT INTO product_scores (product_id, total, est_fob_usd) VALUES (?, 72, 35.5)", (pid,))
+        bad = db.upsert_product(conn, "위험 링크", stage="sourcing", ref_url="javascript:alert(1)")
+        cand = db.upsert_product(conn, "후보 품목", reason="후보 이유")
+    html, _ = dashboard.products_in_progress(conn)
+    card = html[html.index(f'id="prod-{pid}"'):html.index(f'id="prod-{bad}"')]
+    assert "<summary>1번 시장조사 요약 · 72점</summary>" in card                      # 최신 점수·FOB
+    assert "수요 증가 &lt;급등&gt; · 도매 $30~40" in card and "$35.50" in card and "$20.00" not in card
+    assert "189,000원" in card and "일본" in card and "일본 중고 시장이 큼" in card
+    assert "전파인증 필요" in card and "중고 품질 편차" in card
+    assert 'href="https://example.com/item?a=1&amp;b=2"' in card
+    rest = html[html.index(f'id="prod-{bad}"'):]
+    assert 'href="javascript' not in rest and "참고 상품" in rest                     # http(s) 아니면 링크 안 걸음
+    assert "후보 이유" not in html                                                    # 후보는 2번 카드가 아님

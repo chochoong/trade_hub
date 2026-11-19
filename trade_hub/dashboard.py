@@ -57,10 +57,11 @@ def search_links(p):
     links = [("네이버쇼핑", f"https://search.shopping.naver.com/search/all?query={quote(ko)}"),
              ("구글 이미지", f"https://www.google.com/search?tbm=isch&q={quote(ko)}"),
              ("알리바바", f"https://www.alibaba.com/trade/search?SearchText={quote(en)}")]
+    if _field(p, "source_page_url"):
+        links.insert(0, ("해외 판매 페이지", p["source_page_url"]))
     if p["ref_url"]:
         links.insert(0, ("참고 페이지", p["ref_url"]))
-    return '<span class="links">' + " · ".join(
-        f'<a href="{e(u)}" target="_blank" rel="noopener">{lbl}</a>' for lbl, u in links) + "</span>"
+    return '<span class="links">' + " · ".join(web_link(u, lbl) for lbl, u in links) + "</span>"   # ref_url 등은 웹에서 온 값 → http(s)만 링크
 
 
 SERVER = {"on": False}   # trade_hub serve로 그릴 때 True → 로컬 파일은 /file?p=… 로, 조사·선정 버튼 표시
@@ -293,6 +294,31 @@ def actions(p):
             f'<button type="button" class="btn" data-act="research" data-q="{name}">다시 조사</button></div>')
 
 
+def discover_summary(conn, p):
+    """2번 공급처 발굴 카드: 1번 시장조사 요약 (접이식). 2번이 조사 요청에 쓰는 값 그대로 —
+    선정 이유·도매 시세(reason), 규제, 위험, 예상 판매가, 최신 예상 FOB, 추천 공급 국가·이유, 참고 상품 링크."""
+    if p["stage"] != "sourcing":
+        return ""
+    sc = conn.execute("SELECT est_fob_usd, total FROM product_scores WHERE product_id = ? ORDER BY id DESC LIMIT 1",
+                      (p["id"],)).fetchone()
+    country = p["source_country"]
+    items = [("선정 이유·도매 시세", e(p["reason"]) if p["reason"] else ""),
+             ("예상 판매가", num(p["est_retail_krw"], "{:,.0f}원") if p["est_retail_krw"] is not None else ""),
+             ("예상 FOB", num(sc["est_fob_usd"], "${:,.2f}") if sc and sc["est_fob_usd"] is not None else ""),
+             ("추천 공급 국가", (e(db.SOURCE_COUNTRIES.get(country, country)) +
+                             (f' <span class="muted">— {e(p["source_country_reason"])}</span>' if p["source_country_reason"] else ""))
+              if country else ""),
+             ("규제", e(p["regulations"]) if p["regulations"] else ""),
+             ("위험", e(p["risk"]) if p["risk"] else ""),
+             ("참고 상품", web_link(p["ref_url"], p["ref_url"]) if p["ref_url"] else "")]
+    rows = "".join(f'<div><span class="muted">{k}</span> {v}</div>' for k, v in items if v)
+    if not rows:
+        return ""
+    score = f' · {sc["total"]}점' if sc and sc["total"] is not None else ""
+    return (f'<details class="disc-sum small"><summary>1번 시장조사 요약{score}</summary>'
+            f'<div class="long">{rows}</div></details>')
+
+
 def sourcing_button(p, modes_found):
     """공급처 발굴 카드: 구매 방식별 찾기. 이미 찾은 방식은 '다시 찾기'(보조 버튼), 아직이면 '찾기'(강조)."""
     if not SERVER["on"] or p["stage"] != "sourcing":
@@ -403,6 +429,7 @@ def products_in_progress(conn):
     {photo(p, "big")}<div><b>#{p["id"]} {e(p["name"])}</b> <span class="muted small">{e(last["note"] if last else "")} · {e(last["at"][:16] if last else "")}</span>
     <div class="small">{search_links(p)}</div></div>
     <span class="right">{sourcing_button(p, set(groups))}</span></div>
+  {discover_summary(conn, p)}
   {"".join(blocks)}
 </div>""")
     return "".join(cards), len(prods)
@@ -557,6 +584,7 @@ table.tight td{padding:6px 8px}
 font-style:normal;text-align:center;color:#fff;background:rgba(0,0,0,.55)}
 .badge{background:var(--accent-soft);color:var(--accent);border-radius:999px;padding:2px 10px;font-size:12px;font-weight:600}
 details summary{cursor:pointer}.long{white-space:pre-wrap;margin-top:4px;max-width:520px}
+.disc-sum{margin:6px 0 2px}.disc-sum .long{max-width:none}.disc-sum .long>div{margin:2px 0}
 .brief{white-space:pre-wrap}.alerts li.warn{color:var(--warn)}.alerts li.critical,.alerts li.error{color:var(--bad)}
 a{color:var(--accent)}code{background:var(--accent-soft);padding:1px 5px;border-radius:4px}
 .neg{border-top:1px solid var(--line);padding:10px 0 6px}.neg:first-of-type{border-top:0}
