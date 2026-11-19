@@ -26,7 +26,7 @@ from pathlib import Path
 
 PKG_DIR = Path(__file__).resolve().parent
 SCHEMA_PATH = PKG_DIR / "schema.sql"
-SCHEMA_VERSION = 12  # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
+SCHEMA_VERSION = 13  # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
 # 버전별로 추가된 컬럼: 예전 DB에는 connect() 때 ALTER TABLE로 붙인다 (새 DB는 schema.sql에 이미 있음)
 
 
@@ -55,6 +55,7 @@ MIGRATIONS = {
     10: [("products", "source_country", "TEXT"), ("products", "source_country_reason", "TEXT")],   # 1번 추천 공급 국가
     11: [],  # compliance_checks 테이블 추가 (3번 통관·규제) — schema.sql의 CREATE TABLE IF NOT EXISTS로 예전 DB에도 생김
     12: [("products", "source_page_url", "TEXT")],
+    13: [("product_suppliers", "specs_json", "TEXT")],   # 2번이 판매 페이지에서 읽은 제품 사양 → 3번 통관·규제가 읽음   # 1번이 조사 중 본 해외 구매처 상품 상세 페이지 → 2번 첫 후보
 }
 PS_UNIQUE_INDEX = ("CREATE UNIQUE INDEX IF NOT EXISTS ux_ps_product_supplier_mode "
                    "ON product_suppliers(product_id, supplier_id, COALESCE(purchase_mode, ''))")
@@ -285,7 +286,8 @@ SUPPLIER_FIELDS = {"type", "years_in_business", "certifications", "platform_badg
 LINK_FIELDS = {"is_top_pick", "moq", "unit_price_usd", "price_note", "est_landed_krw", "est_margin_pct", "image_url",
                # v4: 2번이 이 품목 기준으로 평가한 결과. *_json 필드는 list/dict를 그대로 넘기면 JSON으로 저장
                "score", "grade", "score_detail_json", "purchase_mode", "trade_terms_json", "first_questions_json",
-               "unverified_json", "evidence_json", "max_order_qty"}
+               "unverified_json", "evidence_json", "max_order_qty",
+               "specs_json"}   # v13: 제품 사양 {"flags": {...}, "materials": [...], "evidence": [...]}
 
 def save_channels(conn, product_id, run_id, channels, purchase_mode=None):
     """2번 results.json의 channels(구매 사이트 순위)를 product_channels에 저장한다. 저장한 행 수를 돌려준다.

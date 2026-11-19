@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 
 import pytest
@@ -413,3 +414,26 @@ def test_compliance_checks_table_created_on_v10_db(tmp_path):
     assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'compliance_checks'").fetchone()
     assert conn.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
     conn.close()
+
+
+def test_v13_specs_json_on_product_suppliers(tmp_path, conn):
+    import sqlite3
+    path = tmp_path / "old.db"
+    db.connect(path).close()
+    old = sqlite3.connect(path)
+    old.executescript("ALTER TABLE product_suppliers DROP COLUMN specs_json; PRAGMA user_version = 12;")
+    old.close()
+    c = db.connect(path)
+    assert "specs_json" in {r["name"] for r in c.execute("PRAGMA table_info(product_suppliers)")}
+    assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
+    c.close()
+    specs = {"flags": {"power_source": "battery_lithium", "wireless": True, "food_contact": None},
+             "materials": ["ABS", "실리콘"], "evidence": [{"claim": "리튬 배터리", "url": "https://example.com"}]}
+    with conn:
+        pid = db.upsert_product(conn, "무선 키보드", stage="sourcing")
+        lid = db.link_supplier(conn, pid, db.upsert_supplier(conn, "Key Co", "China"), specs_json=specs)
+    row = conn.execute("SELECT specs_json FROM product_suppliers WHERE id = ?", (lid,)).fetchone()
+    assert json.loads(row["specs_json"]) == specs                                # dict → JSON 그대로
+    with pytest.raises(sqlite3.IntegrityError):
+        with conn:
+            conn.execute("UPDATE product_suppliers SET specs_json = '{깨진' WHERE id = ?", (lid,))

@@ -161,6 +161,14 @@ CREATE TABLE IF NOT EXISTS product_suppliers (
     first_questions_json  TEXT CHECK (first_questions_json IS NULL OR json_valid(first_questions_json)),  -- 첫 문의 때 물어볼 질문 ["...", ...]
     unverified_json       TEXT CHECK (unverified_json IS NULL OR json_valid(unverified_json)),       -- 확인하지 못한 항목 ["...", ...]
     evidence_json         TEXT CHECK (evidence_json IS NULL OR json_valid(evidence_json)),           -- 근거 [{"claim":"...","url":"..."}]
+    specs_json            TEXT CHECK (specs_json IS NULL OR json_valid(specs_json)),                 -- 제품 사양 (2번이 쓰고 3번이 읽음)  [v13]
+                                              --   {"flags": {"power_source": "battery_lithium", "wireless": true, ...},
+                                              --    "materials": ["ABS", ...], "evidence": [{"claim","url"}]}
+                                              --   flags 키 = compliance_agent flags.py 사실 항목만: power_source, is_electronic,
+                                              --   has_heating_or_motor, wireless, food_contact, chemical_product, hygiene_product,
+                                              --   cosmetic, synthetic_resin_household, textile_wearable, origin_country
+                                              --   (상표·어린이 대상·의료 효과는 3번 정책이 정하므로 넣지 않음)
+                                              --   값: false = 페이지에서 '해당 없음'을 확인함, 모르면 null
     reject_reason    TEXT,
     updated_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime'))
     -- 한 줄 = (품목, 공급처, 구매 방식) [v8]. 같은 업체가 retail·small_batch 양쪽에 나와도 따로 남는다.
