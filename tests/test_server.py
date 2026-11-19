@@ -171,6 +171,7 @@ def test_buy_search_command(monkeypatch, tmp_path):
     cmd, cwd, _ = ORIGINAL_JOB_COMMAND("buysearch", ("--evil x", "watch"))
     assert cmd[1:] == ["main.py", "--search=--evil x", "--category=watch", "--market=rakuten"] and cwd == tmp_path   # 옵션으로 오인 안 됨
     assert ORIGINAL_JOB_COMMAND("buysearch", ("x", "watch", "aliexpress"))[0][-1] == "--market=aliexpress"
+    assert ORIGINAL_JOB_COMMAND("buysearch", ("x", "watch", "ebay"))[0][-1] == "--market=ebay"
     with pytest.raises(ValueError):
         ORIGINAL_JOB_COMMAND("buysearch", ("x", "watch", "taobao"))
 
@@ -197,7 +198,6 @@ def test_buy_search_passes_korean_and_api_key(srv, monkeypatch, tmp_path):
     wait_job(srv, job["id"])
 
 
-    assert ORIGINAL_JOB_COMMAND("buysearch", ("x", "watch", "ebay"))[0][-1] == "--market=ebay"
 def test_dotenv_value(tmp_path):
     from trade_hub.server import dotenv_value
     f = tmp_path / ".env"
@@ -260,3 +260,33 @@ def test_job_lines_arrive_while_running(srv, monkeypatch, tmp_path):
         time.sleep(0.05)
     assert job["status"] == "running" and job["lines"] == ["검색 중…"]
     wait_job(srv, job["id"])
+
+
+def test_buy_watch_api(srv, monkeypatch, tmp_path):
+    from trade_hub import buying as b
+    base = tmp_path / "ba"
+    (base / "reports").mkdir(parents=True)
+    (base / "catalog").mkdir()
+    monkeypatch.setenv("BUYAGENT_DIR", str(base))
+    assert call(srv + "/api/buywatch", {"action": "add"})[0] == 400                          # web.py 없음
+    seen = []
+
+    class FakeWeb:
+        def add_watch(self, base_, search, name=""):
+            seen.append(("add", search["query"]["keyword"], name)); return 200, {"id": "x1"}
+
+        def toggle_watch(self, base_, pid):
+            seen.append(("toggle", pid)); return 200, {"id": pid, "active": "N"}
+    monkeypatch.setattr(b, "watch_api", lambda base_=None: FakeWeb())
+    code, out = call(srv + "/api/buywatch", {"action": "add"})
+    assert code == 400 and "먼저 직접 검색" in out["error"]
+    (base / "reports" / "search.json").write_text(json.dumps({"ok": False, "error": "키 없음", "query": {"keyword": "a"}}),
+                                                  encoding="utf-8")
+    assert "실패한 검색" in call(srv + "/api/buywatch", {"action": "add"})[1]["error"]
+    (base / "reports" / "search.json").write_text(json.dumps(
+        {"ok": True, "query": {"keyword": "セイコー", "keyword_original": "세이코", "category": "watch"}}), encoding="utf-8")
+    assert call(srv + "/api/buywatch", {"action": "add"}) == (200, {"id": "x1"})
+    assert call(srv + "/api/buywatch", {"action": "toggle", "id": "x1"})[1]["active"] == "N"
+    assert call(srv + "/api/buywatch", {"action": "toggle"})[0] == 400
+    assert call(srv + "/api/buywatch", {"action": "rm"})[0] == 400
+    assert seen == [("add", "セイコー", "세이코"), ("toggle", "x1")]

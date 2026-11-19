@@ -85,6 +85,39 @@ def load(base=None):
     return out
 
 
+_WEB = {}                 # (web.py 경로, 수정 시각) → 불러온 모듈
+
+
+def watch_api(base=None):
+    """buyagent web.py 의 add_watch·toggle_watch (products.csv 열 순서·id 규칙·원자적 쓰기를 buyagent와 똑같이).
+    파일 위치로 불러옴 — buyagent 폴더를 sys.path에 넣지 않아 trade_hub 모듈과 이름이 겹치지 않음."""
+    import importlib.util
+    path = Path(base or buyagent_dir()) / "web.py"
+    if not path.is_file():
+        raise RuntimeError(f"buyagent web.py가 없습니다: {path}")
+    key = (str(path), path.stat().st_mtime_ns)
+    mod = _WEB.get(key)
+    if mod is None:                                   # 같은 모듈을 다시 씀 → web.py 의 CSV_LOCK 하나로 동시 클릭도 차례로
+        spec = importlib.util.spec_from_file_location("buyagent_web", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _WEB.clear()
+        _WEB[key] = mod
+    if not (hasattr(mod, "add_watch") and hasattr(mod, "toggle_watch")):
+        raise RuntimeError("buyagent web.py에 add_watch·toggle_watch가 없습니다 (buyagent를 최신으로)")
+    return mod
+
+
+def is_on(row):
+    return (row.get("active") or "Y").strip().upper() not in ("N", "0", "FALSE")
+
+
+def watching(products, keyword):
+    """같은 검색어(keyword)로 이미 감시 목록에 있는 줄 (buyagent add_watch 중복 기준과 같음)."""
+    keyword = (keyword or "").strip()
+    return next((p for p in products if keyword and (p.get("keyword") or "").strip() == keyword), None)
+
+
 def _hub_id(row):
     v = (row.get("hub_product_id") or "").strip()
     return int(v) if v.isdigit() else None
@@ -231,6 +264,16 @@ def _search_section(data):
            f'{e((s.get("run_at") or "")[:16].replace("T", " "))} 검색 · 쇼핑몰 결과 {e(s.get("found", 0))}건')
     if not s.get("ok"):
         sub += f' · <span class="bad">실패: {e(s.get("error") or "")}</span>'
+    watch = ""
+    if SERVER["on"] and s.get("ok") and q.get("keyword") and q.get("category"):
+        same = watching(data["products"], q.get("keyword"))
+        if same:
+            watch = (f'<p class="small">✔ 이미 감시 중 — ID <b>{e(same.get("id"))}</b>'
+                     f'{"" if is_on(same) else " (꺼짐 · 아래 감시 상품에서 켜기)"}</p>')
+        else:
+            watch = (f'<p><button type="button" class="btn primary" data-buywatch="add" data-name="{e(ko or q.get("keyword"))}">'
+                     '＋ 감시에 추가</button> <span class="small muted">이 검색 조건(검색어·카테고리·사이트·필수/제외 단어)을 '
+                     'catalog/products.csv에 넣어 buyagent 정기 감시(매시간)에 포함</span></p>')
     excl = s.get("excluded") or {}
     why = e(", ".join(f"{k}: {v}건" for k, v in excl.items()))
     note = (f'<p class="small muted">걸러낸 결과: {why}</p>' if excl and rows else "")
@@ -241,19 +284,23 @@ def _search_section(data):
     else:                                             # 0건 → 어떤 규칙에 몇 건이 걸렸는지 (왜 안 나오는지)
         body = ('<p class="empty">조건에 맞는 재고 있는 판매처 없음'
                 + (f'<br><span class="small">걸러낸 결과 — {why}</span>' if excl else "") + '</p>')
-    return section("직접 검색", how + body + note, sub)
+    return section("직접 검색", how + watch + body + note, sub)
 
 
 def _products_section(data):
     from trade_hub.dashboard import clip, e, section, table
+    from trade_hub.dashboard import SERVER
     rows = []
     for p in data["products"]:
-        on = (p.get("active") or "Y").strip().upper() not in ("N", "0", "FALSE")
+        on = is_on(p)
         memo = p.get("memo") or ""
         tag = '<span class="pick">2번에서 가져옴</span> ' if FROM_SOURCING in memo else ""
+        state = "활성" if on else '<span class="muted">꺼짐</span>'
+        if SERVER["on"] and p.get("id"):            # buyagent web.py toggle 과 같은 동작 (active Y ↔ N)
+            state += (f' <button type="button" class="btn" data-buywatch="toggle" data-id="{e(p.get("id"))}">'
+                      f'{"끄기" if on else "켜기"}</button>')
         rows.append([e(p.get("id")), _product_link(p.get("name") or p.get("id"), _hub_id(p)), e(p.get("category")),
-                     e(p.get("sources") or "기본"), "활성" if on else '<span class="muted">꺼짐</span>',
-                     tag + clip(memo, 50)])
+                     e(p.get("sources") or "기본"), state, tag + clip(memo, 50)])
     body = table(["ID", "상품", "카테고리", "판매처 소스", "상태", "메모"], rows, "tight") if rows else '<p class="empty">없음</p>'
     return section("감시 상품", body, f'{len(rows)}개 · catalog/products.csv')
 

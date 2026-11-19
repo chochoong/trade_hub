@@ -171,3 +171,45 @@ def test_search_shows_keyword_original_from_buyagent(ba, conn):
         "query": {"keyword": "セイコー 腕時計", "keyword_original": "세이코 손목시계", "category": "watch"},
         "markets": [], "found": 0, "items": []}, ensure_ascii=False), encoding="utf-8")
     assert "(← 세이코 손목시계)" in buying.page()
+
+
+REAL_WEB = buying.buyagent_dir.__globals__["db"].PKG_DIR.parent.parent / "buyagent" / "buyagent" / "web.py"
+
+
+def _search_json(ba, **query):
+    (ba / "reports").mkdir(exist_ok=True)
+    q = {"keyword": "セイコー SBTQ041", "keyword_original": "세이코 SBTQ041", "category": "watch", "market": "ebay",
+         "must_include": ["SBTQ041"], "exclude": ["ベルト", "バンド"], **query}
+    (ba / "reports" / "search.json").write_text(json.dumps({"ok": True, "run_at": "2026-11-19T10:00:00", "query": q,
+        "markets": [], "found": 3, "items": []}, ensure_ascii=False), encoding="utf-8")
+
+
+def test_search_shows_add_watch_or_already_watching(ba):
+    _search_json(ba)
+    assert "감시에 추가" not in buying.page()                       # 정적 화면에는 버튼 없음
+    dashboard.SERVER["on"] = True
+    try:
+        html = buying.page()
+        assert 'data-buywatch="add" data-name="세이코 SBTQ041"' in html
+        assert 'data-buywatch="toggle" data-id="ai-glasses">끄기' in html and 'data-id="watch">켜기' in html
+        _search_json(ba, keyword="セイコー")                       # products.csv 의 watch 줄과 같은 검색어 (꺼진 상태)
+        html = buying.page()
+    finally:
+        dashboard.SERVER["on"] = False
+    assert 'data-buywatch="add"' not in html and "이미 감시 중 — ID <b>watch</b> (꺼짐" in html
+
+
+@pytest.mark.skipif(not REAL_WEB.is_file(), reason="buyagent web.py 없음")
+def test_watch_api_uses_buyagent_add_and_toggle(ba):
+    import shutil
+    shutil.copy(REAL_WEB, ba / "web.py")
+    _search_json(ba)
+    web = buying.watch_api(ba)
+    code, out = web.add_watch(ba, json.loads((ba / "reports" / "search.json").read_text(encoding="utf-8")), "세이코 SBTQ041")
+    assert code == 200
+    row = buying.load()["products"][-1]
+    assert (row["id"], row["name"], row["keyword"], row["category"], row["sources"], row["active"]) == \
+        (out["id"], "세이코 SBTQ041", "セイコー SBTQ041", "watch", "ebay", "Y")
+    assert row["must_include"] == "SBTQ041" and row["exclude"] == "ベルト|バンド"
+    assert web.toggle_watch(ba, out["id"]) == (200, {"id": out["id"], "active": "N"})
+    assert buying.watch_api(ba) is web                                    # 같은 모듈 재사용 (CSV 잠금 공유)

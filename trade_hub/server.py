@@ -319,6 +319,35 @@ def buy_translate(conn, body):
         return 502, {"error": str(err)}
 
 
+def buy_watch(conn, body):
+    """구매대행 감시 목록(buyagent catalog/products.csv): add = 마지막 직접 검색 조건 추가 · toggle = 켜기/끄기.
+    쓰기는 buyagent web.py 의 add_watch·toggle_watch 그대로 (열 순서·id 규칙·중복 거절이 buyagent와 같음)."""
+    action = str(body.get("action") or "")
+    base = buying.buyagent_dir()
+    if action not in ("add", "toggle"):
+        return 400, {"error": "action은 add 또는 toggle"}
+    with LOCK:
+        if any(j["kind"] == "buysearch" and j["status"] == "running" for j in JOBS.values()):
+            return 409, {"error": "직접 검색이 실행 중입니다. 끝난 뒤 다시 눌러 주세요."}
+    try:
+        web = buying.watch_api(base)
+    except Exception as err:                          # web.py 없음·불러오기 실패
+        return 400, {"error": str(err) if isinstance(err, RuntimeError) else f"buyagent web.py를 불러오지 못했습니다: {err}"}
+    if action == "toggle":
+        pid = str(body.get("id") or "").strip()
+        if not pid or len(pid) > 100:
+            return 400, {"error": "감시 상품 ID가 없습니다."}
+        return web.toggle_watch(Path(base), pid)
+    data = buying.load()
+    if data.get("search_error") or not data.get("search"):
+        return 400, {"error": "먼저 직접 검색을 해 주세요."}
+    s = data["search"]
+    if not s.get("ok"):
+        return 400, {"error": "실패한 검색은 감시에 추가할 수 없습니다."}
+    q = s.get("query") or {}
+    return web.add_watch(Path(base), s, q.get("keyword_original") or "")
+
+
 # ---------------------------------------------------------------------------
 # 5번 협상 (negotiation_agent) — 서버는 입력을 검증해 명령 인자로 바꾸고 실행만 한다. DB 기록은 5번이 한다.
 # ---------------------------------------------------------------------------
@@ -535,7 +564,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "요청 형식 오류"})
         route = {"/api/research": research, "/api/select": select,
                  "/api/neg": negotiation, "/api/buysearch": buy_search,
-                 "/api/translate": buy_translate}.get(urlparse(self.path).path)
+                 "/api/translate": buy_translate, "/api/buywatch": buy_watch}.get(urlparse(self.path).path)
         if not route:
             return self._send(404, {"error": "없는 주소"})
         conn = db.connect()

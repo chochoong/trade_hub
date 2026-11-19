@@ -1093,6 +1093,17 @@ document.addEventListener("submit", function (ev) {   // 검색 → 라쿠텐·�
   f.parentNode.querySelector(".buylinks").innerHTML = "";
   startJob("/api/buysearch", body).then(done);
 });
+document.addEventListener("click", function (ev) {   // 구매대행 감시 목록: [감시에 추가]·[켜기]/[끄기] → products.csv
+  var b = ev.target.closest("button[data-buywatch]");
+  if (!b) return;
+  var add = b.dataset.buywatch === "add";
+  if (add && !confirm("「" + b.dataset.name + "」 검색 조건을 buyagent 감시 목록(products.csv)에 추가할까요?
+다음 정기 감시(매시간)부터 가격을 확인합니다.")) return;
+  b.disabled = true;
+  api("/api/buywatch", add ? {action: "add"} : {action: "toggle", id: b.dataset.id})
+    .then(function () { location.hash = "#buy"; location.reload(); })
+    .catch(function (err) { alert(err.message); b.disabled = false; });
+});
 document.addEventListener("submit", function (ev) {   // 5번 협상 폼 → /api/neg (메일은 보내지 않음, 초안만)
   var f = ev.target.closest("form.negf");
   if (!f) return;
