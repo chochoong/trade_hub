@@ -6,8 +6,8 @@
 --  sourcing    2. 공급처 발굴              → suppliers, product_suppliers
 --  negotiation 3. 커뮤니케이션·협상         → messages(초안), quotes
 --  compliance  4. 통관·규제 체크            → products.hs_code·duty_rate·fta_note·regulations (발주 전: 인증·표시는 생산 때 해결)
---  documents   5. 무역서류                 → (PI·CI·PL·계약서 초안: 파일 경로를 tasks/notes에)
---  costing     6. 원가·수익 계산            → product_suppliers.est_landed_krw·est_margin_pct
+--  costing     5. 원가·수익 계산            → product_suppliers.est_landed_krw·est_margin_pct
+--  documents   6. 무역서류                 → (PI·CI·PL·계약서 초안: 파일 경로를 tasks/notes에)
 --  sales       7. 판매·마케팅              → sales
 --  finance     8. 재무·관리                → orders, shipments, ledger_entries
 --  supervisor  슈퍼바이저 (스케줄러 + 검토관) → supervisor_dispatches, briefings, tasks(decision)

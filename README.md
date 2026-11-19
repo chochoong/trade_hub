@@ -1,6 +1,6 @@
 # trade_hub — 1인 무역 에이전트 관제탑
 
-1인 무역 파이프라인의 에이전트들(시장조사 → 공급처 발굴 → 협상 → 통관·규제 → 서류 → 원가 → 판매 → 재무)이
+1인 무역 파이프라인의 에이전트들(시장조사 → 공급처 발굴 → 협상 → 통관·규제 → 원가 → 서류 → 판매 → 재무)이
 함께 쓰는 **공용 DB**와, 모든 에이전트를 지켜보는 **슈퍼바이저**입니다. 각 에이전트는 별도 프로젝트로 두고,
 서로 직접 호출하지 않고 이 DB로 일을 주고받습니다.
 
@@ -75,7 +75,7 @@ python supervisor.py backup          # 공용 DB 백업 (tick에서 하루 1번 
 2. 실행할 때 `with db.agent_run(conn, "<에이전트 이름>") as run:`으로 감싸 `agent_runs`에 기록
    - 쓰기는 `with conn:`으로 **짧게 나눠 커밋**할 것. 커밋 안 한 채 LLM 응답을 기다리면 그동안 DB 쓰기 잠금이 잡혀
      다른 에이전트·CLI가 `database is locked`로 실패함. 실행이 예외로 끝나면 커밋 안 된 쓰기는 버려짐(rollback)
-   (이름: discover · sourcing · negotiation · compliance · documents · costing · sales · finance)
+   (이름: discover · sourcing · negotiation · compliance · costing · documents · sales · finance)
 3. 자기 담당 테이블에만 쓰기 (`trade_hub/schema.sql` 머리말). 단계는 `db.advance_stage`로 앞으로만 이동
 4. 되돌리기 어려운 일(메일 발송·결제 등)은 실행하지 말고 `db.add_task`로 승인 대기함에 남기기
 5. `supervisor.json`에 `command`·`cwd`·실행 조건을 등록하고 `enabled: true`

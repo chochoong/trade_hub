@@ -122,7 +122,7 @@ def _migrate_v8(conn, path):
 
 STAGES = ["candidate", "sourcing", "negotiating", "sampling", "ordered", "shipping", "selling", "closed"]
 TERMINAL_STAGES = {"closed", "dropped"}
-AGENTS = ["discover", "sourcing", "negotiation", "compliance", "documents", "costing", "sales", "finance", "supervisor"]
+AGENTS = ["discover", "sourcing", "negotiation", "compliance", "costing", "documents", "sales", "finance", "supervisor"]
 
 
 def now():

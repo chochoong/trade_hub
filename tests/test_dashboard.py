@@ -216,8 +216,8 @@ def test_sourcing_error_prefix_hidden(conn):
 
 
 def test_compliance_before_documents():
-    # 통관·규제(KC 인증·표시)는 발주 전에 확인해야 해서 4번, 무역서류는 5번
+    # 통관·규제(KC 인증·표시) 4번 → 원가·수익 5번 → 무역서류 6번
     order = [a for a, *_ in dashboard.AGENT_PAGES]
-    assert order.index("compliance") == 3 and order.index("documents") == 4
+    assert order.index("compliance") == 3 and order.index("costing") == 4 and order.index("documents") == 5
     assert [n for _, n, _, _ in dashboard.AGENT_PAGES] == list(range(1, 9))
-    assert dashboard.AGENT_LABEL["compliance"] == "4 통관·규제" and dashboard.AGENT_LABEL["documents"] == "5 서류"
+    assert dashboard.AGENT_LABEL["compliance"] == "4 통관·규제" and dashboard.AGENT_LABEL["costing"] == "5 원가" and dashboard.AGENT_LABEL["documents"] == "6 서류"

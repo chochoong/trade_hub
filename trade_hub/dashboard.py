@@ -22,7 +22,7 @@ STAGE_LABEL = {
 }
 AGENT_LABEL = {
     "discover": "1 시장조사", "sourcing": "2 공급처", "negotiation": "3 협상", "compliance": "4 통관·규제",
-    "documents": "5 서류", "costing": "6 원가", "sales": "7 판매", "finance": "8 재무", "supervisor": "슈퍼바이저",
+    "costing": "5 원가", "documents": "6 서류", "sales": "7 판매", "finance": "8 재무", "supervisor": "슈퍼바이저",
 }
 TASK_KIND = {"send_message": "메일 발송", "review_quote": "견적 검토", "payment": "결제", "document": "서류",
              "decision": "결정", "other": "기타"}
@@ -572,8 +572,8 @@ AGENT_PAGES = [
     # 통관·규제가 서류보다 먼저: KC 인증·표시는 공장 생산 때 해결해야 해서 발주 전에 확인 (선적 뒤엔 보류→폐기·반송)
     ("compliance", 4, "통관·규제 체크", ["HS코드 후보, 관세율·FTA 원산지 혜택 확인",
                                      "KC·식약처·전파인증 등 수입 요건 체크리스트 — 발주 전에 (인증·표시는 생산 때 해결)"]),
-    ("documents", 5, "무역서류", ["PI·CI·Packing List·계약서 초안", "인코텀즈(FOB·CIF·DDP 등) 조건별 비용·책임 정리"]),
-    ("costing", 6, "원가·수익 계산", ["제품가+운임+관세+부가세+수수료 랜딩 코스트", "환율 변동 반영 마진 시뮬레이션"]),
+    ("costing", 5, "원가·수익 계산", ["제품가+운임+관세+부가세+수수료 랜딩 코스트", "환율 변동 반영 마진 시뮬레이션"]),
+    ("documents", 6, "무역서류", ["PI·CI·Packing List·계약서 초안", "인코텀즈(FOB·CIF·DDP 등) 조건별 비용·책임 정리"]),
     ("sales", 7, "판매·마케팅", ["스마트스토어·쿠팡 상세페이지·상품명 SEO·광고 문구", "고객 문의 응대 초안"]),
     ("finance", 8, "재무·관리", ["주문·결제·선적 일정 트래킹", "매출·비용 장부, 부가세 신고 자료 준비"]),
 ]
