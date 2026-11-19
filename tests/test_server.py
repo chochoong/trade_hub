@@ -247,3 +247,16 @@ def test_buy_search_without_buyagent_folder(srv, monkeypatch, tmp_path):
     (tmp_path / "없음" / "main.py").write_text("", encoding="utf-8")
     code, out = call(srv + "/api/buysearch", {"query": "x", "category": "watch"})
     assert code == 400 and "카테고리 설정" in out["error"]
+
+
+def test_job_lines_arrive_while_running(srv, monkeypatch, tmp_path):
+    # 에이전트가 print만 해도 진행 줄이 알림창에 바로 보여야 함 (PYTHONUNBUFFERED) — 끝날 때 한꺼번에 오면 내내 빈 칸
+    from trade_hub import server
+    script = "import time; print('검색 중…'); time.sleep(3)"
+    monkeypatch.setattr(server, "job_command", lambda kind, arg: ([sys.executable, "-c", script], tmp_path, 1))
+    job = server.start_job("research", "x", "테스트")
+    deadline = time.time() + 2.5
+    while time.time() < deadline and not job["lines"]:
+        time.sleep(0.05)
+    assert job["status"] == "running" and job["lines"] == ["검색 중…"]
+    wait_job(srv, job["id"])

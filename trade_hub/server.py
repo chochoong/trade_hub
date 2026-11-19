@@ -167,7 +167,8 @@ def start_job(kind, arg, label, product_id=None, anchor=None):
     job = {"id": job_id, "kind": kind, "agent": KIND_AGENT[kind], "label": label, "status": "running",
            "product_id": product_id, "anchor": anchor, "lines": [], "started": time.time(), "ended": None, "exit_code": None,
            "log": str(logs / f"{datetime.now():%Y%m%d_%H%M%S}_serve_{kind}.log")}
-    env = {**os.environ, "TRADE_DB": str(db.default_path().resolve()), "PYTHONIOENCODING": "utf-8"}
+    env = {**os.environ, "TRADE_DB": str(db.default_path().resolve()), "PYTHONIOENCODING": "utf-8",
+           "PYTHONUNBUFFERED": "1"}   # 진행 줄을 바로바로 넘김 (없으면 파이프라 끝날 때 한꺼번에 와서 알림창이 내내 빈 칸)
     if kind == "buysearch" and not env.get("ANTHROPIC_API_KEY"):   # buyagent 한글 검색어 번역용 — 이 키 하나만 넘김
         key = dotenv_value(ROOT / ".env", "ANTHROPIC_API_KEY")
         if key:
