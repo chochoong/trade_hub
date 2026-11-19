@@ -257,5 +257,40 @@ def test_paused_and_shipping_rate_warnings(ba):
     (ba / "reports" / "latest.json").write_text(json.dumps({"ok": True, "run_at": "2026-11-01T10:00:00", "markets": [],
                                                            "items": []}), encoding="utf-8")
     html = buying.page()
-    assert "⏸ 감시 멈춤 중</b> (2026-11-19 15:00부터)" in html and "그동안 결과가 갱신되지 않는 것은 정상" in html
+    assert "⏸ 감시 전체 멈춤 중 (2026-11-19 15:00부터)" in html and "갱신되지 않는 것은 정상" in html
+    assert "마지막 감시 2026-11-01 10:00" in html and "data-buywatch" not in html            # 정적 화면엔 버튼 없음
     assert "감시 멈춤 중" in buying.nav_item()
+
+
+def test_watch_line_server_mode_uses_buyagent_status(ba, monkeypatch):
+    calls = []
+
+    def fake_call(action, base=None, **kw):
+        calls.append(action)
+        return 200, {"paused_since": None, "schedule": {"registered": True, "next": "2026-11-19 오후 4:00:00"}}
+    monkeypatch.setattr(buying, "watch_call", fake_call)
+    buying.forget_status()
+    (ba / "reports").mkdir()
+    (ba / "reports" / "latest.json").write_text(json.dumps({"ok": True, "demo": True, "run_at": "2026-11-19T15:00:00",
+                                                           "markets": [], "items": []}), encoding="utf-8")
+    dashboard.SERVER["on"] = True
+    try:
+        html = buying.page()
+        buying.page()                                                           # 30초 안에는 다시 묻지 않음
+    finally:
+        dashboard.SERVER["on"] = False
+        buying.forget_status()
+    assert calls == ["status"]
+    assert "● 감시 중" in html and "자동 실행: <b>매시간</b> (다음 2026-11-19 오후 4:00:00)" in html
+    assert "마지막 감시 2026-11-19 15:00 (예시 데이터)" in html
+    assert 'data-buywatch="pause" data-paused="1">⏸ 감시 전체 멈춤' in html
+    assert 'data-buywatch="schedule" data-on="0">자동 실행 끄기' in html
+
+
+@pytest.mark.skipif(not REAL_WEB.is_file(), reason="buyagent web.py 없음")
+def test_pause_uses_real_buyagent(ba):
+    _copy_buyagent_code(ba)
+    assert buying.watch_call("pause", ba, paused=True) == (200, {"paused": True})
+    assert buying.paused_since(ba) and buying.watch_call("status", ba)[1]["paused_since"] == buying.paused_since(ba)
+    assert buying.watch_call("pause", ba, paused=False) == (200, {"paused": False})
+    assert buying.paused_since(ba) is None

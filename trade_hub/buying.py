@@ -102,11 +102,19 @@ if a["action"] == "add":
     r = web.add_watch(base, a["search"], a.get("name") or "", a.get("must"))
 elif a["action"] == "toggle":
     r = web.toggle_watch(base, a["id"])
+elif a["action"] == "pause":        # 감시 전체 멈춤/다시 시작 → core.pause.set_paused
+    r = web.pause_request({"paused": a["paused"]}, base)
+elif a["action"] == "schedule":     # 매시간 자동 실행 등록/해제 (작업 스케줄러)
+    r = web.schedule_request({"on": a["on"]}, base)
+elif a["action"] == "status":
+    r = (200, {"paused_since": web.paused_since(base), "schedule": web.schedule_status()})
 else:
     r = (200, {"must": web.suggest_must(a["query"])})
 print("RESULT_JSON=" + json.dumps(list(r), ensure_ascii=False))
 """
 WATCH_TIMEOUT = 30       # 초
+_STATUS = {}             # 감시 상태 캐시 {"at": 시각, "base": 폴더, "value": dict} — 화면을 그릴 때마다 schtasks를 부르지 않게
+STATUS_TTL = 30          # 초
 _WATCH_LOCK = __import__("threading").Lock()   # 동시 클릭도 한 번에 하나씩 (products.csv 를 각자 읽고 쓰면 한 줄이 사라질 수 있음)
 
 
@@ -131,6 +139,27 @@ def watch_call(action, base=None, **payload):
             return int(code), out
     tail = (r.stderr or r.stdout).strip().splitlines()[-1:] or ["출력 없음"]
     raise RuntimeError(f"buyagent web.py 실행 실패: {tail[0][:200]}")
+
+
+def watch_status(base=None, fresh=False):
+    """buyagent 감시 상태 {"paused_since": str|None, "schedule": {"registered": bool, "next": str}} — buyagent
+    web.paused_since·schedule_status 그대로. 실패하면 None (화면은 멈춤 파일만 직접 읽어 보여 줌)."""
+    import time
+    base = Path(base or buyagent_dir())
+    if not fresh and _STATUS.get("base") == str(base) and time.time() - _STATUS.get("at", 0) < STATUS_TTL:
+        return _STATUS["value"]
+    try:
+        code, out = watch_call("status", base)
+    except RuntimeError:
+        return None
+    if code != 200:
+        return None
+    _STATUS.update(at=time.time(), base=str(base), value=out)
+    return out
+
+
+def forget_status():
+    _STATUS.clear()
 
 
 def is_on(row):
@@ -437,6 +466,36 @@ def _history_section(data):
                    f'전체 {data["history_count"]}건 중 최근 {len(rows)}건')
 
 
+def _watch_line(data):
+    """buyagent 화면과 같은 한 줄 상태: ● 감시 중 / ⏸ 멈춤 · 자동 실행 · 마지막 감시 (+ 서버 모드면 버튼)"""
+    from trade_hub.dashboard import SERVER, e
+    st = watch_status(data["dir"]) if SERVER["on"] else None
+    since = st["paused_since"] if st else data.get("paused_since")
+    if since:
+        state = (f'<span class="warn">⏸ 감시 전체 멈춤 중 ({e(since)}부터) — 정기 실행이 와도 조회·알림을 안 해요 '
+                 '(그동안 최근 실행 결과가 갱신되지 않는 것은 정상)</span>')
+    else:
+        state = '<span class="ok">● 감시 중</span>'
+    sched = ""
+    if st:
+        s = st.get("schedule") or {}
+        sched = (f' · 자동 실행: <b>매시간</b>' + (f' (다음 {e(s.get("next"))})' if s.get("next") else "") if s.get("registered")
+                 else ' · 자동 실행: <span class="warn">등록 안 됨</span> (정기 감시·디스코드 알림을 받으려면 켜 주세요)')
+    latest = data.get("latest") or {}
+    last = latest.get("run_at") or ""
+    last_txt = (f' · 마지막 감시 {e(last[:16].replace("T", " "))}' + (" (예시 데이터)" if latest.get("demo") else "")
+                if last else " · 감시 실행 기록 없음")
+    btns = ""
+    if SERVER["on"]:
+        btns = (f' <button type="button" class="btn" data-buywatch="pause" data-paused="{"0" if since else "1"}">'
+                f'{"▶ 감시 다시 시작" if since else "⏸ 감시 전체 멈춤"}</button>')
+        if st:
+            on = (st.get("schedule") or {}).get("registered")
+            btns += (f' <button type="button" class="btn" data-buywatch="schedule" data-on="{"0" if on else "1"}">'
+                     f'{"자동 실행 끄기 (등록 해제)" if on else "⏱ 매시간 자동 실행 켜기"}</button>')
+    return f'<p class="small">{state}{sched}{last_txt}{btns}</p>'
+
+
 def page(data=None):
     from trade_hub.dashboard import e
     data = data or load()
@@ -450,10 +509,7 @@ def page(data=None):
              f'<ul>{"".join(f"<li>{e(x)}</li>" for x in roles)}</ul><p class="small">{state}</p></div></section>')
     if not data["exists"]:
         return intro
-    notes = ""
-    if data.get("paused_since"):
-        notes += (f'<p class="small"><b>⏸ 감시 멈춤 중</b> ({e(data["paused_since"])}부터) — buyagent 화면에서 다시 시작하면 '
-                  '정기 감시·알림이 돌아옵니다.</p>')
+    notes = _watch_line(data)
     if data.get("ship_warnings"):
         notes += ('<p class="small warn">⚠ ' + " / ".join(e(w) for w in data["ship_warnings"]) +
                   " → buyagent 화면의 '배대지 요금'에서 확인·저장 (대시보드는 읽기만)</p>")

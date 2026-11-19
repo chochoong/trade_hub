@@ -317,3 +317,25 @@ def test_buy_watch_api(srv, monkeypatch, tmp_path):
     assert call(srv + "/api/buywatch", {"action": "toggle"})[0] == 400
     assert call(srv + "/api/buywatch", {"action": "rm"})[0] == 400
     assert seen == [("add", "セイコー", "세이코", None), ("add", "セイコー", "세이코", "SBTR|SBTQ041"), ("toggle", "x1")]
+
+
+def test_buy_watch_pause_and_schedule(srv, monkeypatch, tmp_path):
+    from trade_hub import buying as b
+    base = tmp_path / "ba"
+    (base / "catalog").mkdir(parents=True)
+    (base / "web.py").write_text("", encoding="utf-8")
+    monkeypatch.setenv("BUYAGENT_DIR", str(base))
+    seen = []
+
+    def fake_call(action, base_=None, **kw):
+        seen.append((action, kw))
+        if action == "schedule":
+            return 500, {"error": "작업 스케줄러 등록 실패: 액세스 거부"}
+        return 200, {"paused": kw["paused"]}
+    monkeypatch.setattr(b, "watch_call", fake_call)
+    assert call(srv + "/api/buywatch", {"action": "pause", "paused": True}) == (200, {"paused": True})
+    assert call(srv + "/api/buywatch", {"action": "pause", "paused": "yes"})[0] == 400
+    code, out = call(srv + "/api/buywatch", {"action": "schedule", "on": True})
+    assert code == 500 and out["error"] == "작업 스케줄러 등록 실패: 액세스 거부"               # buyagent 문구 그대로
+    assert call(srv + "/api/buywatch", {"action": "schedule"})[0] == 400
+    assert seen == [("pause", {"paused": True}), ("schedule", {"on": True})]

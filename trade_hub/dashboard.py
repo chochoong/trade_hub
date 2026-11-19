@@ -1208,7 +1208,18 @@ document.addEventListener("submit", function (ev) {   // 검색 → 라쿠텐·�
 document.addEventListener("click", function (ev) {   // 구매대행 감시 목록: [감시에 추가]·[켜기]/[끄기] → products.csv
   var b = ev.target.closest("button[data-buywatch]");
   if (!b) return;
-  var add = b.dataset.buywatch === "add", body = {action: "toggle", id: b.dataset.id};
+  var kind = b.dataset.buywatch, add = kind === "add", body = {action: "toggle", id: b.dataset.id};
+  if (kind === "pause") {
+    var stop = b.dataset.paused === "1";
+    if (!confirm(stop ? "감시를 전체 멈출까요? 정기 실행이 와도 조회·디스코드 알림을 하지 않아요. 상품별 켜짐/꺼짐은 그대로예요."
+                      : "감시를 다시 시작할까요? 다음 정기 실행부터 켜진 상품을 조회하고 알림을 보내요.")) return;
+    body = {action: "pause", paused: stop};
+  } else if (kind === "schedule") {
+    var on = b.dataset.on === "1";
+    if (!confirm(on ? "Windows 작업 스케줄러에 buyagent를 매시간 실행으로 등록할까요? 정기 감시·디스코드 알림을 buyagent가 보냅니다."
+                    : "매시간 자동 실행을 해제할까요? 정기 감시와 디스코드 알림이 멈춥니다.")) return;
+    body = {action: "schedule", on: on};
+  }
   if (add) {
     var mi = b.parentNode.querySelector('input[name="must"]'), must = mi ? mi.value.trim() : "";
     var msg = "「" + b.dataset.name + "」 검색 조건을 buyagent 감시 목록(products.csv)에 추가할까요?"

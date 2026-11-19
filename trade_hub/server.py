@@ -341,10 +341,19 @@ def buy_watch(conn, body):
     쓰기는 buyagent web.py 의 add_watch·toggle_watch 그대로 (열 순서·id 규칙·중복 거절이 buyagent와 같음)."""
     action = str(body.get("action") or "")
     base = buying.buyagent_dir()
-    if action not in ("add", "toggle"):
-        return 400, {"error": "action은 add 또는 toggle"}
+    if action not in ("add", "toggle", "pause", "schedule"):
+        return 400, {"error": "action은 add·toggle·pause·schedule 중 하나"}
     if not (Path(base) / "web.py").is_file():
         return 400, {"error": f"buyagent web.py가 없습니다: {Path(base) / 'web.py'} (buyagent를 최신으로)"}
+    if action in ("pause", "schedule"):              # 감시 전체 멈춤·매시간 자동 실행 (buyagent pause_request·schedule_request)
+        key = "paused" if action == "pause" else "on"
+        if not isinstance(body.get(key), bool):
+            return 400, {"error": f"{key} 값(true/false)이 필요합니다."}
+        buying.forget_status()
+        try:
+            return buying.watch_call(action, base, **{key: body[key]})
+        finally:
+            buying.forget_status()
     with LOCK:
         if any(j["kind"] == "buysearch" and j["status"] == "running" for j in JOBS.values()):
             return 409, {"error": "직접 검색이 실행 중입니다. 끝난 뒤 다시 눌러 주세요."}
