@@ -4,9 +4,9 @@
 -- 에이전트 (agent_runs.agent 값)
 --  discover    1. 시장조사·아이템 발굴      → products(candidate), product_scores
 --  sourcing    2. 공급처 발굴              → suppliers, product_suppliers
---  negotiation 3. 커뮤니케이션·협상         → messages(초안), quotes
---  compliance  4. 통관·규제 체크            → products.hs_code·duty_rate·fta_note·regulations (발주 전: 인증·표시는 생산 때 해결)
---  costing     5. 원가·수익 계산            → product_suppliers.est_landed_krw·est_margin_pct
+--  compliance  3. 통관·규제 체크            → products.hs_code·duty_rate·fta_note·regulations (발주 전: 인증·표시는 생산 때 해결)
+--  costing     4. 원가·수익 계산            → product_suppliers.est_landed_krw·est_margin_pct
+--  negotiation 5. 커뮤니케이션·협상         → messages(초안), quotes
 --  documents   6. 무역서류                 → (PI·CI·PL·계약서 초안: 파일 경로를 tasks/notes에)
 --  sales       7. 판매·마케팅              → sales
 --  finance     8. 재무·관리                → orders, shipments, ledger_entries
@@ -184,9 +184,9 @@ CREATE TABLE IF NOT EXISTS messages (
     reply_to_id          INTEGER REFERENCES messages(id),   -- 후속 메일 → 원래 보낸 메일
     language             TEXT,                -- en / zh ...  [v7]
     translation          TEXT,                -- 한국어 번역 (보낸 초안·받은 답장)  [v7]
-    analysis_json        TEXT CHECK (analysis_json IS NULL OR json_valid(analysis_json)),   -- 3번 분석 결과  [v7]
+    analysis_json        TEXT CHECK (analysis_json IS NULL OR json_valid(analysis_json)),   -- 5번 분석 결과  [v7]
                                               --   받은 답장: {"summary_ko","open_questions_ko",...}
-                                              --     NULL = 아직 분석 안 함 (3번 auto가 처리) / {"error": ...} = 분석 실패
+                                              --     NULL = 아직 분석 안 함 (5번 auto가 처리) / {"error": ...} = 분석 실패
                                               --   보낸 초안: {"strategy_ko","tone"} — 사람 참고용, 발송 안 됨
     external_id          TEXT,                -- 메일 서비스의 메시지 id (Gmail: 보낸/받은 메일). 같은 메일 중복 저장 방지  [v9]
     external_thread_id   TEXT,                -- 메일 서비스의 대화(스레드) id — 답장을 어느 공급처 줄에 붙일지 판단  [v9]

@@ -12,7 +12,7 @@
 
 넣는 일정
   📤 메일 보낸 날 · 📥 답장 받은 날 (messages)
-  ⏰ 후속 메일 예정일 — 보낸 뒤 3일 답이 없으면 (3번 negotiation_agent의 FOLLOWUP_DUE_SQL과 같은 기준)
+  ⏰ 후속 메일 예정일 — 보낸 뒤 3일 답이 없으면 (5번 negotiation_agent의 FOLLOWUP_DUE_SQL과 같은 기준)
   📌 할 일 기한 (tasks.due_date, 대기 중) · ⌛ 견적 유효기간 만료 (quotes.valid_until)
   🚢 선적 예정 · 도착 예정 (shipments.etd / eta)
 
@@ -169,7 +169,7 @@ def desired_events(conn, today=None):
         n = r["followups"] + 1
         add(_ev(f"followup:{r['id']}", "followup", base + timedelta(days=FOLLOWUP_DAYS) if base else None,
                 f"⏰ 후속 메일 예정 ({n}/{MAX_FOLLOWUPS}) · {r['company']}",
-                [_who(r), f"{FOLLOWUP_DAYS}일째 답이 없으면 3번이 후속 메일 초안을 만듭니다 (보내는 건 직접).",
+                [_who(r), f"{FOLLOWUP_DAYS}일째 답이 없으면 5번이 후속 메일 초안을 만듭니다 (보내는 건 직접).",
                  f"원래 메일 #{r['id']}" + (f" — {r['subject']}" if r["subject"] else "")], r["product_id"]))
 
     for r in conn.execute("""SELECT t.*, p.name AS product FROM tasks t LEFT JOIN products p ON p.id = t.product_id

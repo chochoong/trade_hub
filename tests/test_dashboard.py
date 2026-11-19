@@ -91,7 +91,7 @@ def test_pipeline_shows_connected_agent_and_its_page(conn, tmp_path):
     html = dashboard.build(tmp_path / "d.html", conn).read_text(encoding="utf-8")
     nav = html[html.index('<nav class="pipe-nav">'):html.index("</nav>")]
     assert 'class="step ok" href="#a2"' in nav                 # 2번 연결됨
-    assert 'class="step off" href="#a3"' in nav                # 3번 미연결
+    assert 'class="step off" href="#a3"' in nav                # 3번(통관·규제) 미연결
     page2 = html[html.index('id="p-a2"'):html.index('id="p-a3"')]
     assert "품목별 공급처" in page2 and "키캡" in page2
 
@@ -216,8 +216,9 @@ def test_sourcing_error_prefix_hidden(conn):
 
 
 def test_compliance_before_documents():
-    # 통관·규제(KC 인증·표시) 4번 → 원가·수익 5번 → 무역서류 6번
+    # 통관·규제(KC 인증·표시) 3번 → 원가·수익 4번 → 협상 5번 → 무역서류 6번
     order = [a for a, *_ in dashboard.AGENT_PAGES]
-    assert order.index("compliance") == 3 and order.index("costing") == 4 and order.index("documents") == 5
+    assert order[2:6] == ["compliance", "costing", "negotiation", "documents"]
     assert [n for _, n, _, _ in dashboard.AGENT_PAGES] == list(range(1, 9))
-    assert dashboard.AGENT_LABEL["compliance"] == "4 통관·규제" and dashboard.AGENT_LABEL["costing"] == "5 원가" and dashboard.AGENT_LABEL["documents"] == "6 서류"
+    assert dashboard.AGENT_LABEL["compliance"] == "3 통관·규제" and dashboard.AGENT_LABEL["costing"] == "4 원가"
+    assert dashboard.AGENT_LABEL["negotiation"] == "5 협상" and dashboard.AGENT_LABEL["documents"] == "6 서류"

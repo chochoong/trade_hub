@@ -47,10 +47,10 @@ MIGRATIONS = {
         ("product_suppliers", "evidence_json", _json_col("evidence_json"))],
     5: [("product_suppliers", "max_order_qty", "INTEGER")],
     6: [],   # product_channels 테이블 추가 (새 테이블은 schema.sql의 CREATE TABLE IF NOT EXISTS로 예전 DB에도 생김)
-    7: [("messages", "language", "TEXT"), ("messages", "translation", "TEXT"),   # 3번 negotiation 연결
+    7: [("messages", "language", "TEXT"), ("messages", "translation", "TEXT"),   # 5번 negotiation 연결
         ("messages", "analysis_json", _json_col("analysis_json"))],
     8: [],   # product_suppliers 한 줄 기준 (품목, 공급처) → (품목, 공급처, 구매 방식): _migrate_v8 (칸 추가가 아닌 유일한 예외)
-    9: [("messages", "external_id", "TEXT"), ("messages", "external_thread_id", "TEXT"),   # 3번 Gmail 연동
+    9: [("messages", "external_id", "TEXT"), ("messages", "external_thread_id", "TEXT"),   # 5번 Gmail 연동
         ("messages", "external_draft_id", "TEXT")],
 }
 PS_UNIQUE_INDEX = ("CREATE UNIQUE INDEX IF NOT EXISTS ux_ps_product_supplier_mode "
@@ -122,7 +122,7 @@ def _migrate_v8(conn, path):
 
 STAGES = ["candidate", "sourcing", "negotiating", "sampling", "ordered", "shipping", "selling", "closed"]
 TERMINAL_STAGES = {"closed", "dropped"}
-AGENTS = ["discover", "sourcing", "negotiation", "compliance", "costing", "documents", "sales", "finance", "supervisor"]
+AGENTS = ["discover", "sourcing", "compliance", "costing", "negotiation", "documents", "sales", "finance", "supervisor"]
 
 
 def now():

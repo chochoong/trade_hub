@@ -5,8 +5,8 @@ trade_hub serve — 내 PC에서만 열리는 대시보드 서버 (http://127.0.
   · 검색창 → DB에 없는 품목은 [새로 조사] → 1번 에이전트 지정 품목 조사 (supplier_agent.py --product)
   · 후보 품목 [공급처 찾기] → 사람이 선정(candidate → sourcing) + 2번 에이전트 실행 (sourcing_agent from-db <번호>)
   · 구매대행 '직접 검색' → buyagent main.py --search (일본 쇼핑몰 최저가·원가·권장가, DB에 기록하지 않음)
-  · 3번 협상 페이지: [견적 요청 초안]·[답장 붙여넣기]·[역제안]·[후속 메일]·[검토 완료/발송 완료/버림]
-    → 3번 에이전트 실행 (python -m negotiation_agent ...). 메일은 보내지 않는다 — 발송은 사람이 직접 하고 '발송 완료'만 누른다.
+  · 5번 협상 페이지: [견적 요청 초안]·[답장 붙여넣기]·[역제안]·[후속 메일]·[검토 완료/발송 완료/버림]
+    → 5번 에이전트 실행 (python -m negotiation_agent ...). 메일은 보내지 않는다 — 발송은 사람이 직접 하고 '발송 완료'만 누른다.
   · 실행 중인 작업 패널 (진행 로그), 끝나면 결과 품목으로 이동
   · 리포트·사진 같은 로컬 파일 보기 (/file — 허용된 폴더만)
 
@@ -92,7 +92,7 @@ def job_command(kind, arg):
             raise ValueError(f"사이트: {market!r}")
         return ([sys.executable, "main.py", f"--search={q}", f"--category={cat}", f"--market={market}"],
                 buying.buyagent_dir(), BUYSEARCH_TIMEOUT)
-    if kind == "neg":                       # 3번: arg = negotiation_agent 명령 인자 목록 (neg_args가 검증해서 만든 것)
+    if kind == "neg":                       # 5번: arg = negotiation_agent 명령 인자 목록 (neg_args가 검증해서 만든 것)
         cwd, python, timeout = agent_spec("negotiation")
         return [python, "-m", "negotiation_agent", *arg], cwd, timeout
     raise ValueError(kind)
@@ -199,7 +199,7 @@ def _watch(job, proc, timeout):
                 except ValueError:
                     pass
                 continue
-            if line.startswith("RESULT_ANCHOR="):  # 3번: 끝나면 이동할 화면 위치 (예: ps-12)
+            if line.startswith("RESULT_ANCHOR="):  # 5번: 끝나면 이동할 화면 위치 (예: ps-12)
                 anchor = line.split("=", 1)[1].strip()
                 if anchor.replace("-", "").isalnum():
                     job["anchor"] = anchor
@@ -319,7 +319,7 @@ def buy_translate(conn, body):
 
 
 # ---------------------------------------------------------------------------
-# 3번 협상 (negotiation_agent) — 서버는 입력을 검증해 명령 인자로 바꾸고 실행만 한다. DB 기록은 3번이 한다.
+# 5번 협상 (negotiation_agent) — 서버는 입력을 검증해 명령 인자로 바꾸고 실행만 한다. DB 기록은 5번이 한다.
 # ---------------------------------------------------------------------------
 NEG_LANGS = {"en", "zh"}
 NEG_TONES = {"soft": "부드럽게", "normal": "보통", "firm": "강하게"}
@@ -378,7 +378,7 @@ def neg_args(conn, body):
         args += [f"--incoterm={inco}"] if inco else []
         args += [f"--note={v}" for v in [_text(body, "note")] if v]
         args += ["--force"] if body.get("force") else []
-        return args, f"3번 견적 요청 초안: {ps['company']}"
+        return args, f"5번 견적 요청 초안: {ps['company']}"
     if action == "reply":
         ps = _row(conn, PS_NAME_SQL, _id(body, "ps_id"), "공급처 연결")
         text = str(body.get("text") or "").strip()
@@ -386,11 +386,11 @@ def neg_args(conn, body):
             raise BadRequest("답장 내용을 붙여넣어 주세요.")
         if len(text) > MAX_REPLY:
             raise BadRequest(f"답장은 {MAX_REPLY:,}자 이내로 붙여넣어 주세요.")
-        inbox = db.default_path().parent / "inbox"          # 긴 글은 명령줄 대신 파일로 넘기고 3번이 저장 후 지움
+        inbox = db.default_path().parent / "inbox"          # 긴 글은 명령줄 대신 파일로 넘기고 5번이 저장 후 지움
         inbox.mkdir(parents=True, exist_ok=True)
         path = inbox / f"{datetime.now():%Y%m%d_%H%M%S_%f}_ps{ps['id']}.txt"
         path.write_text(text, encoding="utf-8")
-        return ["reply", str(ps["id"]), f"--file={path}", "--delete-file"], f"3번 답장 저장·분석: {ps['company']}"
+        return ["reply", str(ps["id"]), f"--file={path}", "--delete-file"], f"5번 답장 저장·분석: {ps['company']}"
     if action == "counter":
         q = _row(conn, "SELECT q.id, s.company FROM quotes q JOIN product_suppliers ps ON ps.id = q.product_supplier_id "
                        "JOIN suppliers s ON s.id = ps.supplier_id WHERE q.id = ?", _id(body, "quote_id"), "견적")
@@ -409,9 +409,9 @@ def neg_args(conn, body):
             args.append(f"--price={p:g}")
         args += [f"--note={v}" for v in [_text(body, "note")] if v]
         args += [f"--other={v}" for v in [_text(body, "other", 200)] if v]
-        return args, f"3번 역제안 초안({NEG_TONES[tone]}): {q['company']}"
+        return args, f"5번 역제안 초안({NEG_TONES[tone]}): {q['company']}"
     if action == "gmail_sync":
-        return ["gmail-sync"], "3번 Gmail 확인 (발송 확인·새 답장)"
+        return ["gmail-sync"], "5번 Gmail 확인 (발송 확인·새 답장)"
     if action in ("mark", "followup", "analyze", "gmail_draft"):
         m = _row(conn, MSG_NAME_SQL, _id(body, "message_id"), "메일")
         if action == "gmail_draft":
@@ -422,10 +422,10 @@ def neg_args(conn, body):
             status = body.get("status")
             if status not in NEG_MARKS or m["direction"] != "outbound":
                 raise BadRequest("바꿀 수 없는 상태입니다.")
-            return ["mark", str(m["id"]), status], f"3번 메일 #{m['id']} {NEG_MARKS[status]}: {m['company']}"
+            return ["mark", str(m["id"]), status], f"5번 메일 #{m['id']} {NEG_MARKS[status]}: {m['company']}"
         if action == "followup":
-            return ["followup", str(m["id"])], f"3번 후속 메일 초안: {m['company']}"
-        return ["analyze", str(m["id"])], f"3번 답장 다시 분석: {m['company']}"
+            return ["followup", str(m["id"])], f"5번 후속 메일 초안: {m['company']}"
+        return ["analyze", str(m["id"])], f"5번 답장 다시 분석: {m['company']}"
     raise BadRequest("알 수 없는 작업입니다.")
 
 

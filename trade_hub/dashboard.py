@@ -21,8 +21,8 @@ STAGE_LABEL = {
     "ordered": "발주", "shipping": "운송·통관", "selling": "판매", "closed": "종료", "dropped": "중단",
 }
 AGENT_LABEL = {
-    "discover": "1 시장조사", "sourcing": "2 공급처", "negotiation": "3 협상", "compliance": "4 통관·규제",
-    "costing": "5 원가", "documents": "6 서류", "sales": "7 판매", "finance": "8 재무", "supervisor": "슈퍼바이저",
+    "discover": "1 시장조사", "sourcing": "2 공급처", "compliance": "3 통관·규제", "costing": "4 원가",
+    "negotiation": "5 협상", "documents": "6 서류", "sales": "7 판매", "finance": "8 재무", "supervisor": "슈퍼바이저",
 }
 TASK_KIND = {"send_message": "메일 발송", "review_quote": "견적 검토", "payment": "결제", "document": "서류",
              "decision": "결정", "other": "기타"}
@@ -567,12 +567,13 @@ AGENT_PAGES = [
                                        "\"수요는 있는데 공급이 적은 품목\"을 정기적으로 리포트"]),
     ("sourcing", 2, "공급처 발굴", ["알리바바·1688·글로벌소싱 등에서 후보 업체 리스트업",
                                  "업체 신뢰도(업력·인증·거래 후기) 1차 검증"]),
-    ("negotiation", 3, "커뮤니케이션·협상", ["다국어 이메일·인콰이어리 작성, 번역",
-                                         "견적 요청(RFQ)·샘플 요청·가격 협상 문안 초안 (발송은 본인이 검토 후)"]),
-    # 통관·규제가 서류보다 먼저: KC 인증·표시는 공장 생산 때 해결해야 해서 발주 전에 확인 (선적 뒤엔 보류→폐기·반송)
-    ("compliance", 4, "통관·규제 체크", ["HS코드 후보, 관세율·FTA 원산지 혜택 확인",
+    # 통관·규제·원가가 협상보다 먼저: KC 인증·표시는 공장 생산 때 해결해야 해서 발주 전에 확인 (선적 뒤엔 보류→폐기·반송),
+    # 인증 요건과 랜딩 코스트를 알아야 협상에서 공장에 요구할 것과 목표가를 정할 수 있음
+    ("compliance", 3, "통관·규제 체크", ["HS코드 후보, 관세율·FTA 원산지 혜택 확인",
                                      "KC·식약처·전파인증 등 수입 요건 체크리스트 — 발주 전에 (인증·표시는 생산 때 해결)"]),
-    ("costing", 5, "원가·수익 계산", ["제품가+운임+관세+부가세+수수료 랜딩 코스트", "환율 변동 반영 마진 시뮬레이션"]),
+    ("costing", 4, "원가·수익 계산", ["제품가+운임+관세+부가세+수수료 랜딩 코스트", "환율 변동 반영 마진 시뮬레이션"]),
+    ("negotiation", 5, "커뮤니케이션·협상", ["다국어 이메일·인콰이어리 작성, 번역",
+                                         "견적 요청(RFQ)·샘플 요청·가격 협상 문안 초안 (발송은 본인이 검토 후)"]),
     ("documents", 6, "무역서류", ["PI·CI·Packing List·계약서 초안", "인코텀즈(FOB·CIF·DDP 등) 조건별 비용·책임 정리"]),
     ("sales", 7, "판매·마케팅", ["스마트스토어·쿠팡 상세페이지·상품명 SEO·광고 문구", "고객 문의 응대 초안"]),
     ("finance", 8, "재무·관리", ["주문·결제·선적 일정 트래킹", "매출·비용 장부, 부가세 신고 자료 준비"]),
@@ -692,7 +693,7 @@ def moved_on(conn):
                    f"{len(rows)}개 · 후보 목록에서 빠진 품목 · 이름을 누르면 지금 있는 화면으로 이동")
 
 
-# --- 3번 협상 (negotiation_agent) -----------------------------------------------------
+# --- 5번 협상 (negotiation_agent) -----------------------------------------------------
 MSG_STATUS = {"draft": "초안", "approved": "검토 완료", "sent": "보냄", "discarded": "버림", "received": "받음"}
 MSG_KIND = {"rfq": "견적 요청", "follow_up": "후속 메일", "negotiation": "역제안", "sample": "샘플 요청",
             "order": "발주", "other": "메일"}
@@ -704,7 +705,7 @@ MARK_BUTTONS = {   # 현재 상태 → (바꿀 상태, 버튼, 확인 문구)
     "draft": [("approved", "검토 완료", ""), ("sent", "발송 완료로 표시", SENT_Q), ("discarded", "버림", "이 초안을 버릴까요?")],
     "approved": [("sent", "발송 완료로 표시", SENT_Q), ("draft", "초안으로", ""), ("discarded", "버림", "이 초안을 버릴까요?")],
 }
-COST = "3번 에이전트를 실행할까요? (수십 초 · API 비용)"
+COST = "5번 에이전트를 실행할까요? (수십 초 · API 비용)"
 
 
 def neg_form(action, hidden, inner, confirm=COST, cls=""):
@@ -787,7 +788,7 @@ COUNTER_FIELDS = (
     '<input name="other" maxlength="200" placeholder="타 업체 비교 언급 (선택, 사실만)">'
     '<input name="note" maxlength="500" placeholder="추가 요청 (예: MOQ 200으로, 샘플비 환급)">'
     '<button class="btn primary">역제안 초안 만들기</button>'
-    '<div class="small muted">단가를 비우면 3번의 내부 목표가를 씁니다. 상한가는 초안·공용 DB에 들어가지 않습니다.</div>')
+    '<div class="small muted">단가를 비우면 5번의 내부 목표가를 씁니다. 상한가는 초안·공용 DB에 들어가지 않습니다.</div>')
 
 
 def quote_rows(conn, ps_id):
@@ -844,7 +845,7 @@ def supplier_thread(conn, s):
                   'placeholder="공급처가 보낸 메일·채팅 내용을 그대로 붙여넣기"></textarea>'
                   '<button class="btn primary">저장하고 분석</button>'
                   '<div class="small muted">요약·번역하고, 가격이 있으면 견적표에 넣습니다.</div>',
-                  confirm="답장을 저장하고 3번 에이전트로 분석할까요? (수십 초 · API 비용)", cls="stack") + "</details>")
+                  confirm="답장을 저장하고 5번 에이전트로 분석할까요? (수십 초 · API 비용)", cls="stack") + "</details>")
     contact = " · ".join(x for x in (e(s["contact_email"]), e(s["contact_other"])) if x)
     return f"""<div class="neg" id="ps-{s["link_id"]}">
   <div class="neg-head">{'<span class="pick">추천</span> ' if s["is_top_pick"] else ""}<b>{e(s["company"])}</b>
@@ -978,7 +979,7 @@ function show() {
     target = document.getElementById("prod-" + m[1]);
     var page = target && target.closest(".page");
     id = page ? page.id.slice(2) : "home";
-  } else if (/^ps-\\d+$/.test(id)) {          // #ps-12 → 3번 페이지의 그 공급처 (접힌 '다른 후보' 안이면 펼침)
+  } else if (/^ps-\\d+$/.test(id)) {          // #ps-12 → 5번 페이지의 그 공급처 (접힌 '다른 후보' 안이면 펼침)
     target = document.getElementById(id);
     var pg = target && target.closest(".page");
     var fold = target && target.closest("details.more");
@@ -1092,7 +1093,7 @@ document.addEventListener("submit", function (ev) {   // 검색 → 라쿠텐·�
   f.parentNode.querySelector(".buylinks").innerHTML = "";
   startJob("/api/buysearch", body).then(done);
 });
-document.addEventListener("submit", function (ev) {   // 3번 협상 폼 → /api/neg (메일은 보내지 않음, 초안만)
+document.addEventListener("submit", function (ev) {   // 5번 협상 폼 → /api/neg (메일은 보내지 않음, 초안만)
   var f = ev.target.closest("form.negf");
   if (!f) return;
   ev.preventDefault();

@@ -15,9 +15,9 @@
 |---|---|---|---|---|
 | 1 | `discover` | 시장조사·아이템 발굴 | `../supplier_agent` | ✅ 연결됨 |
 | 2 | `sourcing` | 공급처 발굴 | `../trade_sourcing_agent` | ✅ 연결됨 (`python -m sourcing_agent from-db`, 7장) |
-| 3 | `negotiation` | 커뮤니케이션·협상 (메일은 초안만) | `../negotiation_agent` | ✅ 연결됨 (7.7) |
-| 4 | `compliance` | 통관·규제 체크 (발주 전 — KC 인증·표시는 생산 때 해결, 선적 뒤엔 통관 보류→폐기·반송) | 미정 | - |
-| 5 | `costing` | 원가·수익 계산 | 미정 | - |
+| 3 | `compliance` | 통관·규제 체크 (발주 전 — KC 인증·표시는 생산 때 해결, 선적 뒤엔 통관 보류→폐기·반송) | 미정 | - |
+| 4 | `costing` | 원가·수익 계산 | 미정 | - |
+| 5 | `negotiation` | 커뮤니케이션·협상 (메일은 초안만) — 인증 요건·원가를 안 뒤에 | `../negotiation_agent` | ✅ 연결됨 (7.7) |
 | 6 | `documents` | 무역서류 (PI·CI·PL·계약서) | 미정 | - |
 | 7 | `sales` | 판매·마케팅 | 미정 | - |
 | 8 | `finance` | 재무·관리 | 미정 | - |
