@@ -354,3 +354,67 @@ def test_select_oem_only_from_sourcing_stage(srv, conn, monkeypatch):
     assert conn.execute("SELECT stage FROM products WHERE id = ?", (cand,)).fetchone()[0] == "candidate"   # 단계 그대로
     code, out = call(srv + "/api/select", {"product_id": src, "mode": "oem"})
     assert code == 200 and seen[-1][0] == (src, "oem", "China") and "대량 사입·OEM용 공급처 찾기" in seen[-1][1]
+
+
+# --- 3번 통관·규제 [전체 점검]·[다시 점검] ------------------------------------------------
+def test_compliance_job_command(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "agent_spec", lambda agent: (tmp_path, "py", 30))
+    cmd, cwd, timeout = ORIGINAL_JOB_COMMAND("compliance", (16, "api"))
+    assert cmd == ["py", "-m", "compliance_agent", "check-hub", "16", "--official", "api"] and timeout == 30
+    cmd, _, _ = ORIGINAL_JOB_COMMAND("compliance", (None, "files"))
+    assert cmd == ["py", "-m", "compliance_agent", "check-hub", "--recheck", "--official", "files"]
+    with pytest.raises(ValueError):
+        ORIGINAL_JOB_COMMAND("compliance", (None, "maybe"))
+
+
+def test_compliance_route_validates_and_runs(srv, conn, monkeypatch):
+    seen = []
+    real = server.job_command
+    monkeypatch.setattr(server, "job_command", lambda kind, arg: (seen.append((kind, arg)), real(kind, arg))[1])
+    with conn:
+        pid = db.upsert_product(conn, "AI안경", stage="sourcing")
+        cand = db.upsert_product(conn, "후보")
+    code, job = call(srv + "/api/compliance", {"product_id": pid})
+    assert code == 200 and f"#{pid} AI안경" in job["label"] and job["anchor"] == "a3"
+    assert wait_job(srv, job["id"])["status"] == "done"
+    code, job = call(srv + "/api/compliance", {"official": "files"})
+    assert code == 200 and "진행 품목 전체" in job["label"]
+    wait_job(srv, job["id"])
+    assert seen == [("compliance", (pid, "api")), ("compliance", (None, "files"))]
+    assert call(srv + "/api/compliance", {"product_id": cand})[0] == 400       # 후보 품목은 점검 안 함
+    assert call(srv + "/api/compliance", {"product_id": 9999})[0] == 404
+    assert call(srv + "/api/compliance", {"official": "maybe"})[0] == 400
+    with conn:   # 슈퍼바이저 등 다른 곳에서 3번이 실행 중
+        conn.execute("INSERT INTO agent_runs (agent, status) VALUES ('compliance', 'running')")
+    assert call(srv + "/api/compliance", {})[0] == 409
+
+
+def test_compliance_job_gets_keys_without_overriding_env(srv, conn, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "from-env")
+    monkeypatch.delenv("DATA_GO_KR_KEY", raising=False)
+    monkeypatch.setattr(server, "dotenv_value", lambda path, name: "from-dotenv" if name == "ANTHROPIC_API_KEY" else None)
+    monkeypatch.setattr(server, "windows_user_env", lambda name: "from-registry" if name == "DATA_GO_KR_KEY" else None)
+    seen = {}
+    real_popen = server.subprocess.Popen
+    monkeypatch.setattr(server.subprocess, "Popen", lambda cmd, **kw: (seen.update(env=kw["env"]), real_popen(cmd, **kw))[1])
+    with conn:
+        pid = db.upsert_product(conn, "키캡", stage="sourcing")
+    code, job = call(srv + "/api/compliance", {"product_id": pid})
+    assert code == 200
+    assert seen["env"]["ANTHROPIC_API_KEY"] == "from-env"          # 서버 환경변수가 우선
+    assert seen["env"]["DATA_GO_KR_KEY"] == "from-registry"        # 서버를 켠 뒤 넣은 키도 찾음
+    wait_job(srv, job["id"])
+
+
+def test_compliance_buttons_only_in_server_mode(conn, tmp_path):
+    from trade_hub import dashboard
+    with conn:
+        db.upsert_product(conn, "AI안경", stage="sourcing")
+    static = dashboard.build(tmp_path / "s.html", conn, refs=False).read_text(encoding="utf-8")
+    assert 'data-act="compliance"' not in static
+    dashboard.SERVER["on"] = True
+    try:
+        html = "".join(dashboard.agent_body(conn, "compliance"))
+    finally:
+        dashboard.SERVER["on"] = False
+    assert html.count('data-act="compliance"') == 2 and 'id="compliance-official"' in html   # 전체 + 품목 1개

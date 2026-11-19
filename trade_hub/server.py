@@ -5,6 +5,8 @@ trade_hub serve — 내 PC에서만 열리는 대시보드 서버 (http://127.0.
   · 검색창 → DB에 없는 품목은 [새로 조사] → 1번 에이전트 지정 품목 조사 (supplier_agent.py --product)
   · 후보 품목 [공급처 찾기] → 사람이 선정(candidate → sourcing) + 2번 에이전트 실행 (sourcing_agent from-db <번호>)
   · 구매대행 '직접 검색' → buyagent main.py --search (일본 쇼핑몰 최저가·원가·권장가, DB에 기록하지 않음)
+  · 3번 통관·규제 페이지 [전체 점검]·품목별 [다시 점검] → 3번 에이전트 실행
+    (python -m compliance_agent check-hub [번호] --official api|files|off). 판정은 3번이 compliance_checks에 기록
   · 5번 협상 페이지: [견적 요청 초안]·[답장 붙여넣기]·[역제안]·[후속 메일]·[검토 완료/발송 완료/버림]
     → 5번 에이전트 실행 (python -m negotiation_agent ...). 메일은 보내지 않는다 — 발송은 사람이 직접 하고 '발송 완료'만 누른다.
   · 실행 중인 작업 패널 (진행 로그), 끝나면 결과 품목으로 이동
@@ -97,13 +99,25 @@ def job_command(kind, arg):
             raise ValueError(f"사이트: {market!r}")
         return ([sys.executable, "main.py", f"--search={q}", f"--category={cat}", f"--market={market}"],
                 buying.buyagent_dir(), BUYSEARCH_TIMEOUT)
+    if kind == "compliance":                # 3번: arg = (품목 번호 또는 None=진행 품목 전체, 공식 대조 방식) — compliance가 검증한 값
+        pid, official = arg
+        if official not in OFFICIAL_MODES:
+            raise ValueError(f"공식 대조: {official!r}")
+        cwd, python, timeout = agent_spec("compliance")
+        target = [str(int(pid))] if pid else ["--recheck"]       # 번호를 주면 판정이 있어도 다시 점검
+        return [python, "-m", "compliance_agent", "check-hub", *target, "--official", official], cwd, timeout
     if kind == "neg":                       # 5번: arg = negotiation_agent 명령 인자 목록 (neg_args가 검증해서 만든 것)
         cwd, python, timeout = agent_spec("negotiation")
         return [python, "-m", "negotiation_agent", *arg], cwd, timeout
     raise ValueError(kind)
 
 
-KIND_AGENT = {"research": "discover", "discover": "discover", "sourcing": "sourcing", "neg": "negotiation", "buysearch": "buyagent"}
+KIND_AGENT = {"research": "discover", "discover": "discover", "sourcing": "sourcing", "compliance": "compliance",
+              "neg": "negotiation", "buysearch": "buyagent"}
+# 3번 관세청 공식 데이터 대조: api = HS·관세율 파일 + 세관장확인 API(인증키 DATA_GO_KR_KEY) / files = 파일만 / off
+OFFICIAL_MODES = {"api": "공식 대조(파일+API)", "files": "공식 대조(파일만)", "off": "공식 대조 안 함"}
+# 3번 실행에 넘길 키 (서버를 켠 뒤에 넣은 키도 쓰도록): 이 서버 환경변수 > 3번 폴더 .env > trade_hub .env > Windows 사용자 환경변수
+COMPLIANCE_KEYS = ("ANTHROPIC_API_KEY", "DATA_GO_KR_KEY")
 BUYSEARCH_TIMEOUT = 5                                   # 분 (라쿠텐 검색 페이지 2장 + 크롬 실행)
 # 직접 검색 사이트 = buyagent --market (buyagent main.py SEARCH_MARKETS와 같은 값). 타오바오·1688은 화면에서 링크만
 BUY_MARKETS = buying.BUY_MARKETS
@@ -162,6 +176,19 @@ def dotenv_value(path, name):
     return None
 
 
+def windows_user_env(name):
+    """Windows 사용자 환경변수 (서버를 켠 뒤에 setx·SetEnvironmentVariable로 넣은 값). 없거나 Windows가 아니면 None."""
+    if os.name != "nt":
+        return None
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as k:
+            v = winreg.QueryValueEx(k, name)[0]
+        return str(v).strip() or None
+    except OSError:
+        return None
+
+
 def start_job(kind, arg, label, product_id=None, anchor=None):
     cmd, cwd, timeout = job_command(kind, arg)
     if not Path(cwd).is_dir():
@@ -178,6 +205,13 @@ def start_job(kind, arg, label, product_id=None, anchor=None):
         key = dotenv_value(ROOT / ".env", "ANTHROPIC_API_KEY")
         if key:
             env["ANTHROPIC_API_KEY"] = key
+    if kind == "compliance":                # 3번: LLM 키·관세청 키만 찾아서 넘김 (값은 로그·화면에 남기지 않음)
+        for name in COMPLIANCE_KEYS:
+            if not env.get(name):
+                key = (dotenv_value(Path(cwd) / ".env", name) or dotenv_value(ROOT / ".env", name)
+                       or windows_user_env(name))
+                if key:
+                    env[name] = key
     proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             stdin=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace")
     with LOCK:
@@ -295,6 +329,32 @@ def select(conn, body):
     return 200, job_view(start_job("sourcing", (pid, mode, country),
                                    f"2번 {PURCHASE_MODES[mode]}용 공급처 찾기 ({COUNTRIES[country]}): #{pid} {row['name']}",
                                    product_id=pid))
+
+
+def compliance(conn, body):
+    """3번 통관·규제 점검. product_id가 있으면 그 품목만 다시, 없으면 진행 중인 품목 전체(--recheck)."""
+    official = body.get("official") or "api"
+    if official not in OFFICIAL_MODES:
+        return 400, {"error": f"공식 대조는 {', '.join(OFFICIAL_MODES)} 중 하나여야 합니다."}
+    pid, row = body.get("product_id"), None
+    if pid not in (None, ""):
+        try:
+            pid = int(pid)
+        except (TypeError, ValueError):
+            return 400, {"error": "품목 번호가 올바르지 않습니다."}
+        row = conn.execute("SELECT name, stage FROM products WHERE id = ?", (pid,)).fetchone()
+        if row is None:
+            return 404, {"error": f"품목 번호 {pid}가 없습니다."}
+        if row["stage"] in ("candidate", "dropped"):
+            return 400, {"error": f"#{pid}는 {dashboard.STAGE_LABEL.get(row['stage'], row['stage'])} 품목이라 점검하지 않습니다."}
+    else:
+        pid = None
+    reason = busy_reason(conn, "compliance")
+    if reason:
+        return 409, {"error": reason}
+    target = f"#{pid} {row['name']}" if pid else "진행 품목 전체"
+    return 200, job_view(start_job("compliance", (pid, official), f"3번 통관·규제 점검 ({OFFICIAL_MODES[official]}): {target}",
+                                   product_id=pid, anchor="a3"))   # 끝나면 3번 페이지로
 
 
 def buy_search(conn, body):
@@ -593,7 +653,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError
         except ValueError:
             return self._send(400, {"error": "요청 형식 오류"})
-        route = {"/api/research": research, "/api/discover": discover, "/api/select": select,
+        route = {"/api/research": research, "/api/discover": discover, "/api/select": select, "/api/compliance": compliance,
                  "/api/neg": negotiation, "/api/buysearch": buy_search,
                  "/api/translate": buy_translate, "/api/buywatch": buy_watch}.get(urlparse(self.path).path)
         if not route:

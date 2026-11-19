@@ -753,8 +753,23 @@ def compliance_rows(conn):
         out.append([f'#{r["id"]} {e(r["name"])}', e(STAGE_LABEL.get(r["stage"], r["stage"])), compliance_verdict(c),
                     clip(" · ".join(certs), 80) if certs else ('<span class="muted">없음</span>' if c else "–"),
                     hs_cell, "–" if r["duty_rate"] is None else f'{r["duty_rate"] * 100:g}%', clip(r["fta_note"], 40),
-                    clip(r["regulations"], 70)])
-    return table(["품목", "단계", "최신 판정", "필요 인증·요건", "HS 코드", "관세율", "FTA", "메모(인증·규제)"], out)
+                    clip(r["regulations"], 70)]
+                   + ([f'<button type="button" class="btn" data-act="compliance" data-id="{r["id"]}" data-name="{e(r["name"])}">'
+                       f'{"다시 점검" if c else "점검"}</button>'] if SERVER["on"] else []))
+    return table(["품목", "단계", "최신 판정", "필요 인증·요건", "HS 코드", "관세율", "FTA", "메모(인증·규제)"]
+                 + (["작업"] if SERVER["on"] else []), out)
+
+
+# 3번 점검 실행 줄 (서버 모드): 공식 대조 방식 고르기 + [전체 점검]. 값은 server.OFFICIAL_MODES와 같게
+COMPLIANCE_OFFICIAL = [("api", "공식 대조: 파일 + 세관장확인 API"), ("files", "공식 대조: HS·관세율 파일만"), ("off", "공식 대조 안 함")]
+
+
+def compliance_run_bar():
+    opts = "".join(f'<option value="{v}">{e(t)}</option>' for v, t in COMPLIANCE_OFFICIAL)
+    return ('<div class="discover-run"><select id="compliance-official" aria-label="관세청 공식 데이터 대조">' + opts
+            + '</select><button type="button" class="snew" data-act="compliance" data-id="" data-name="진행 품목 전체">'
+              '전체 점검</button><span class="muted small">공급처 발굴·협상 단계 품목 전부 다시 판정 · 품목당 30초~1분 · '
+              'LLM API 비용 · 판정만 기록하고 메일·단계는 바꾸지 않음</span></div>')
 
 
 def costing_rows(conn):
@@ -1031,7 +1046,8 @@ def agent_body(conn, agent):
     if agent == "documents":
         return [section("서류 할 일", tasks_of(conn, ["document"]))]
     if agent == "compliance":
-        return [section("진행 품목의 HS 코드·관세·인증", compliance_rows(conn))]
+        return [(compliance_run_bar() if SERVER["on"] else "")
+                + section("진행 품목의 HS 코드·관세·인증", compliance_rows(conn))]
     if agent == "costing":
         return [section("공급처별 원가·마진", costing_rows(conn))]
     if agent == "sales":
@@ -1177,6 +1193,12 @@ document.addEventListener("click", function (ev) {
     ml += " · " + (cs ? cs.options[cs.selectedIndex].text : "중국");
     if (!confirm("#" + b.dataset.id + " " + b.dataset.name + "\\n[" + ml + "] 방식으로 공급처를 찾을까요? 공급처 발굴 단계로 넘기고 2번 에이전트를 실행합니다. (5~10분 · API 비용)")) return;
     startJob("/api/select", {product_id: Number(b.dataset.id), mode: mode, country: country});
+  } else if (b.dataset.act === "compliance") {
+    var os = document.getElementById("compliance-official"), official = os ? os.value : "api";
+    var ol = os ? os.options[os.selectedIndex].text : "공식 대조: 파일 + 세관장확인 API";
+    var who = b.dataset.id ? "#" + b.dataset.id + " " + b.dataset.name : "공급처 발굴·협상 단계 품목 전체";
+    if (!confirm(who + "\\n3번 통관·규제 점검을 다시 할까요? [" + ol + "] (품목당 30초~1분 · LLM API 비용)")) return;
+    startJob("/api/compliance", b.dataset.id ? {product_id: Number(b.dataset.id), official: official} : {official: official});
   } else if (b.dataset.act === "research") {
     if (!confirm("「" + b.dataset.q + "」을(를) 1번 에이전트로 다시 조사할까요? (1~3분 · API 비용)")) return;
     startJob("/api/research", {query: b.dataset.q});
