@@ -670,14 +670,62 @@ def tasks_of(conn, kinds):
                    clip(r["detail"], 60)] for r in rows])
 
 
+VERDICT_CLS = {"go": "ok", "conditional": "warn", "hold": "bad"}
+
+
+def _json_list(text):
+    try:
+        v = json.loads(text) if text else []
+    except ValueError:
+        return []
+    return v if isinstance(v, list) else []
+
+
+def _names(items, *keys):
+    """[{"title": ...}, "문자열", ...] → 이름 목록 (keys 중 처음 있는 값)"""
+    out = []
+    for it in items:
+        if isinstance(it, dict):
+            v = next((it.get(k) for k in keys if it.get(k)), None)
+            if v:
+                out.append(str(v))
+        elif it:
+            out.append(str(it))
+    return out
+
+
+def compliance_verdict(c):
+    """최신 통관·규제 판정 칸: 판정 배지 + 이유 + 판정일·LLM 여부 + 보고서 링크."""
+    if c is None:
+        return '<span class="muted">판정 없음</span>'
+    v = c["verdict"]
+    reasons = _names(_json_list(c["verdict_reasons_json"]), "text", "reason", "title")
+    unknown = _json_list(c["unknown_flags_json"])
+    report = ""
+    if c["report_path"] and Path(c["report_path"]).is_file():
+        report = f' · <a href="{e(file_href(c["report_path"]))}" target="_blank" rel="noopener">보고서</a>'
+    return (f'<span class="{VERDICT_CLS.get(v, "muted")}"><b>{e(db.COMPLIANCE_VERDICTS.get(v, v))}</b></span>'
+            + (f'<div class="small">{clip(" / ".join(reasons), 90)}</div>' if reasons else "")
+            + (f'<div class="small warn">모르는 항목 {len(unknown)}개: {clip(", ".join(map(str, unknown)), 60)}</div>' if unknown else "")
+            + f'<div class="small muted">{e(c["checked_on"])}{" · LLM 분류" if c["used_llm"] else ""}{report}</div>')
+
+
 def compliance_rows(conn):
     rows = conn.execute(f"""SELECT * FROM products WHERE stage NOT IN ('candidate', 'dropped')
                             ORDER BY {db.stage_order_sql()} DESC, id""").fetchall()
-    return table(["품목", "단계", "HS 코드", "관세율", "FTA", "인증·규제"],
-                 [[f'#{r["id"]} {e(r["name"])}', e(STAGE_LABEL.get(r["stage"], r["stage"])),
-                   e(r["hs_code"]) or '<span class="muted">미확인</span>',
-                   "–" if r["duty_rate"] is None else f'{r["duty_rate"] * 100:g}%', clip(r["fta_note"], 40),
-                   clip(r["regulations"], 70)] for r in rows])
+    out = []
+    for r in rows:
+        c = db.latest_compliance_check(conn, r["id"])
+        certs = _names(_json_list(c["required_certs_json"]), "title", "id") if c else []
+        hs = _names(_json_list(c["hs_candidates_json"]), "code") if c else []
+        hs_cell = (e(r["hs_code"]) + ' <span class="small muted">확정</span>' if r["hs_code"]
+                   else (e(", ".join(hs[:3])) + ' <span class="small muted">후보</span>' if hs
+                         else '<span class="muted">미확인</span>'))
+        out.append([f'#{r["id"]} {e(r["name"])}', e(STAGE_LABEL.get(r["stage"], r["stage"])), compliance_verdict(c),
+                    clip(" · ".join(certs), 80) if certs else ('<span class="muted">없음</span>' if c else "–"),
+                    hs_cell, "–" if r["duty_rate"] is None else f'{r["duty_rate"] * 100:g}%', clip(r["fta_note"], 40),
+                    clip(r["regulations"], 70)])
+    return table(["품목", "단계", "최신 판정", "필요 인증·요건", "HS 코드", "관세율", "FTA", "메모(인증·규제)"], out)
 
 
 def costing_rows(conn):

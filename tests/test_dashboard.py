@@ -247,3 +247,27 @@ def test_page_script_has_no_syntax_error(conn, tmp_path, server):
     js.write_text("\n".join(re.findall(r"<script>(.*?)</script>", html, re.S)), encoding="utf-8")
     r = subprocess.run(["node", "--check", str(js)], capture_output=True, text=True, encoding="utf-8")
     assert r.returncode == 0, r.stderr
+
+
+def test_compliance_page_shows_latest_check(conn, tmp_path):
+    report = tmp_path / "hub_1_report.md"
+    report.write_text("# 보고서", encoding="utf-8")
+    with conn:
+        pid = db.upsert_product(conn, "전기 주전자", stage="sourcing")
+        other = db.upsert_product(conn, "판정 없는 품목", stage="sourcing")
+        db.save_compliance_check(conn, pid, None, "go", "2026-11-18", verdict_reasons=["옛 판정"])
+        db.save_compliance_check(conn, pid, None, "hold", "2026-11-19", used_llm=True, report_path=str(report),
+                                 verdict_reasons=["KC 안전인증 필요 <확인>"], unknown_flags=["battery"],
+                                 required_certs=[{"id": "kc_safety", "title": "KC 안전인증", "timing": "발주 전"}],
+                                 hs_candidates=[{"code": "8516.79", "description": "전열기기", "reason": "-"}])
+    html = dashboard.compliance_rows(conn)
+    row = html[html.index("전기 주전자"):html.index("판정 없는 품목")]
+    assert '<span class="bad"><b>보류</b></span>' in row and "옛 판정" not in row     # 최신 판정만
+    assert "KC 안전인증 필요 &lt;확인&gt;" in row and "모르는 항목 1개: battery" in row
+    assert "2026-11-19 · LLM 분류" in row and 'target="_blank" rel="noopener">보고서</a>' in row
+    assert "KC 안전인증" in row and "8516.79" in row and "후보" in row
+    assert "판정 없음" in html[html.index("판정 없는 품목"):]
+    with conn:
+        conn.execute("UPDATE products SET hs_code = '8516.71' WHERE id = ?", (pid,))
+    row = dashboard.compliance_rows(conn)
+    assert "8516.71" in row and "확정" in row and "8516.79" not in row               # 사람이 확정한 HS 코드가 우선
