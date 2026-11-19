@@ -1097,8 +1097,7 @@ document.addEventListener("click", function (ev) {   // 구매대행 감시 목�
   var b = ev.target.closest("button[data-buywatch]");
   if (!b) return;
   var add = b.dataset.buywatch === "add";
-  if (add && !confirm("「" + b.dataset.name + "」 검색 조건을 buyagent 감시 목록(products.csv)에 추가할까요?
-다음 정기 감시(매시간)부터 가격을 확인합니다.")) return;
+  if (add && !confirm("「" + b.dataset.name + "」 검색 조건을 buyagent 감시 목록(products.csv)에 추가할까요?\\n다음 정기 감시(매시간)부터 가격을 확인합니다.")) return;
   b.disabled = true;
   api("/api/buywatch", add ? {action: "add"} : {action: "toggle", id: b.dataset.id})
     .then(function () { location.hash = "#buy"; location.reload(); })

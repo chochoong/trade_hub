@@ -1,3 +1,7 @@
+import re
+import shutil
+import subprocess
+
 import pytest
 
 from trade_hub import dashboard, db, naver
@@ -222,3 +226,14 @@ def test_compliance_before_documents():
     assert [n for _, n, _, _ in dashboard.AGENT_PAGES] == list(range(1, 9))
     assert dashboard.AGENT_LABEL["compliance"] == "3 통관·규제" and dashboard.AGENT_LABEL["costing"] == "4 원가"
     assert dashboard.AGENT_LABEL["negotiation"] == "5 협상" and dashboard.AGENT_LABEL["documents"] == "6 서류"
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node 없음")
+@pytest.mark.parametrize("server", [False, True])
+def test_page_script_has_no_syntax_error(conn, tmp_path, server):
+    # 스크립트 한 곳만 문법이 틀려도 화면 전환·버튼이 전부 멈춤 (예: 파이썬 문자열의 \n 이 JS 문자열 안에서 진짜 줄바꿈이 됨)
+    html = dashboard.render(conn, server=server)
+    js = tmp_path / "page.js"
+    js.write_text("\n".join(re.findall(r"<script>(.*?)</script>", html, re.S)), encoding="utf-8")
+    r = subprocess.run(["node", "--check", str(js)], capture_output=True, text=True, encoding="utf-8")
+    assert r.returncode == 0, r.stderr
