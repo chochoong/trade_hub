@@ -10,6 +10,7 @@ DB에는 아무것도 쓰지 않는다. 다시 실행하면 최신 상태로 다
 """
 
 import json
+import re
 from datetime import datetime
 from html import escape
 from pathlib import Path
@@ -749,7 +750,21 @@ def _analysis(m):
     return v if isinstance(v, dict) else {}
 
 
-def message_item(m, waiting=None, can_follow=False):
+EMAIL_IN_TEXT = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
+
+
+def supplier_emails(s):
+    """연락처 칸(contact_email·contact_other)에 있는 메일 주소 전부 — 5번 gmail.find_emails 와 같은 규칙."""
+    out = []
+    for t in (s["contact_email"], s["contact_other"]):
+        for a in EMAIL_IN_TEXT.findall(t or ""):
+            a = a.lower().rstrip(".")
+            if a not in out:
+                out.append(a)
+    return ", ".join(out[:5])
+
+
+def message_item(m, waiting=None, can_follow=False, to_default=""):
     out = m["direction"] == "outbound"
     a = _analysis(m)
     when = (m["sent_at"] or m["created_at"] or "")[:16].replace("T", " ")
@@ -782,11 +797,18 @@ def message_item(m, waiting=None, can_follow=False):
     if SERVER["on"]:
         if out and m["status"] in ("draft", "approved"):
             acts.append(f'<button type="button" class="btn" data-copy="msg-{m["id"]}">원문 복사</button>' + mark_form(m))
+            # 받는 사람: 비우면 공급처 메일 → 같은 Gmail 대화의 상대 주소 순으로 채움 (negotiation_agent gmail.push_draft)
+            to_input = (f'<input type="text" name="to" value="{e(to_default or "")}" size="26" '
+                        'placeholder="공급처 메일 없음 — 입력 (쉼표로 여러 명)" autocomplete="email">')
             if m["external_draft_id"]:       # Gmail 임시보관함에 있음 → Gmail에서 보내면 동기화 때 '보냄'으로 바뀜
                 acts.append('<span class="small ok">📨 Gmail 임시보관함에 있음 — Gmail에서 직접 보내세요</span>')
+                acts.append(neg_form("gmail_draft", {"message_id": m["id"]},
+                                     to_input + '<button class="btn">받는 사람 바꾸기</button>',
+                                     confirm="Gmail 임시보관함 초안의 받는 사람을 바꿀까요? "
+                                             "(Gmail에서 고친 본문은 이 초안 원문으로 돌아갑니다. 보내지는 않습니다)", cls="inline"))
             else:
                 acts.append(neg_form("gmail_draft", {"message_id": m["id"]},
-                                     '<button class="btn">Gmail 임시보관함에 넣기</button>',
+                                     to_input + '<button class="btn">Gmail 임시보관함에 넣기</button>',
                                      confirm="이 초안을 Gmail 임시보관함에 넣을까요? (보내지는 않습니다)", cls="inline"))
         if can_follow:
             target = m["reply_to_id"] if m["kind"] == "follow_up" and m["reply_to_id"] else m["id"]
@@ -844,7 +866,8 @@ def supplier_thread(conn, s):
         waiting = (datetime.now() - datetime.fromisoformat(last["sent_at"])).days
     pending_fu = any(m["kind"] == "follow_up" and m["status"] in ("draft", "approved") for m in msgs)
     items = "".join(message_item(m, waiting if m is last else None,
-                                 can_follow=(m is last and waiting is not None and not pending_fu)) for m in msgs)
+                                 can_follow=(m is last and waiting is not None and not pending_fu),
+                                 to_default=supplier_emails(s)) for m in msgs)
     has_rfq = any(m["kind"] == "rfq" and m["status"] != "discarded" for m in msgs)
     forms = ""
     if SERVER["on"] and not has_rfq:

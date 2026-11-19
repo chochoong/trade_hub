@@ -110,9 +110,17 @@ def test_gmail_buttons_and_args(conn):
     html = dashboard.render(conn, server=True)
     assert "Gmail 임시보관함에 있음" in html and "Gmail 임시보관함에 넣기" not in html
     assert server.neg_args(conn, {"action": "gmail_draft", "message_id": ids["draft"]})[0] == ["gmail-draft", str(ids["draft"])]
+    assert "받는 사람 바꾸기" in html and 'name="to"' in html
+    assert server.neg_args(conn, {"action": "gmail_draft", "message_id": ids["draft"], "to": " a@b.com,  c@d.com "})[0]         == ["gmail-draft", str(ids["draft"]), "--to=a@b.com, c@d.com"]
     assert server.neg_args(conn, {"action": "gmail_sync"})[0] == ["gmail-sync"]
     try:
         server.neg_args(conn, {"action": "gmail_draft", "message_id": ids["reply"]})       # 받은 메일은 안 됨
     except server.BadRequest:
         return
     raise AssertionError("받은 메일을 Gmail 초안으로 넣으면 안 됨")
+
+
+def test_recipient_prefilled_from_contact_fields():
+    s = {"contact_email": "info@beyondcase.com / fiona@beyondcase.com", "contact_other": "WeChat x · 메일 Sales@Beyond.cn."}
+    assert dashboard.supplier_emails(s) == "info@beyondcase.com, fiona@beyondcase.com, sales@beyond.cn"
+    assert dashboard.supplier_emails({"contact_email": None, "contact_other": "Alibaba 메시지만"}) == ""

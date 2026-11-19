@@ -465,7 +465,9 @@ def neg_args(conn, body):
         if action == "gmail_draft":
             if m["direction"] != "outbound":
                 raise BadRequest("보낼 메일 초안만 Gmail에 넣을 수 있습니다.")
-            return ["gmail-draft", str(m["id"])], f"3번 Gmail 임시보관함에 넣기 #{m['id']}: {m['company']}"
+            to = _text(body, "to", 400)        # 형식 검사는 5번(gmail.parse_recipients)이 함
+            return (["gmail-draft", str(m["id"])] + ([f"--to={to}"] if to else []),
+                    f"5번 Gmail 임시보관함에 넣기 #{m['id']}: {m['company']}")
         if action == "mark":
             status = body.get("status")
             if status not in NEG_MARKS or m["direction"] != "outbound":
