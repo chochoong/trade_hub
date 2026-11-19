@@ -496,3 +496,20 @@ def test_spec_flag_keys_match_compliance_agent():
     policy = {"children_target", "has_character_or_cute_design", "medical_claim", "brand_or_character", "licensed"}
     assert set(db.SPEC_FLAG_KEYS) == set(ns["FLAGS"]) - policy
     assert tuple(ns["FLAGS"]["power_source"]["values"]) == db.SPEC_FLAG_KEYS["power_source"]
+
+
+def test_supervisor_compliance_when_sql_rechecks_after_supplier_answer(conn):
+    import json as _json
+    sql = _json.loads((db.PKG_DIR.parent / "supervisor.json").read_text(encoding="utf-8"))["agents"]["compliance"]["when_sql"]
+    count = lambda: conn.execute(sql).fetchone()[0]
+    with conn:
+        pid = db.upsert_product(conn, "벽선반", stage="sourcing")
+        ps = db.link_supplier(conn, pid, db.upsert_supplier(conn, "Shelf Co", "China"))
+    assert count() == 1                                                          # 판정 없음
+    with conn:
+        db.save_compliance_check(conn, pid, None, "hold", "2026-11-19")
+        conn.execute("UPDATE compliance_checks SET created_at = '2026-11-19T10:00:00'")
+    assert count() == 0
+    with conn:
+        db.merge_supplier_specs(conn, ps, {"chemical_product": False}, [{"claim": "접착제 없음", "message_id": 1}])
+    assert count() == 1                                                          # 판정 뒤 공급처 답 → 다시 판정
