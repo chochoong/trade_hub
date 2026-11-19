@@ -206,7 +206,17 @@ def test_candidate_has_two_mode_buttons(conn, monkeypatch):
         db.upsert_product(conn, "후보")
     html = dashboard.render(conn, server=True)
     assert ">구매대행용 찾기</button>" in html and ">소량 사입용 찾기</button>" in html
-    assert '<option value="China">중국</option><option value="Japan">일본</option>' in html   # 기본 중국
+    assert ('<option value="China">중국</option><option value="Japan">일본</option>'
+            '<option value="USA">미국</option>') in html                                   # 추천 없으면 중국(첫 칸)
+
+
+def test_country_select_preselects_recommendation(conn, monkeypatch):
+    monkeypatch.setitem(dashboard.SERVER, "on", True)
+    with conn:
+        db.upsert_product(conn, "빈티지 필름 카메라", source_country="USA", source_country_reason="eBay 중고 매물이 많음")
+    html = dashboard.render(conn, server=True)
+    assert '<option value="USA" selected>미국 (추천)</option>' in html
+    assert "1번 추천: 미국 — eBay 중고 매물이 많음" in html
 
 
 def test_sourcing_error_prefix_hidden(conn):

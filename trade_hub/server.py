@@ -40,6 +40,7 @@ CONFIG = ROOT / "supervisor.json"
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8765
 MAX_QUERY = 100
+DISCOVER_COUNT = 10                                     # 자동 발굴 후보 수 (supervisor.json 주간 실행과 같게)
 REF_TTL = 3600                                          # 참고 이미지 다시 검색하는 간격(초)
 
 JOBS = {}                                               # 작업 id → dict (메모리, 서버를 끄면 사라짐)
@@ -69,7 +70,7 @@ def agent_spec(agent):
 
 # 대시보드에서 고를 수 있는 2번 구매 방식 (슈퍼바이저 자동 실행은 supervisor.json대로 small_batch만)
 PURCHASE_MODES = {"retail": "구매대행", "small_batch": "소량 사입"}
-COUNTRIES = {"China": "중국", "Japan": "일본"}                   # 2번 sourcing_agent --country 값 (기본 China)
+COUNTRIES = db.SOURCE_COUNTRIES                   # 2번 sourcing_agent --country 값 (기본 China)
 
 
 def job_command(kind, arg):
@@ -77,15 +78,19 @@ def job_command(kind, arg):
     if kind == "research":
         cwd, python, timeout = agent_spec("discover")
         return [python, "supplier_agent.py", "--product", arg, "--no-open"], cwd, timeout
+    if kind == "discover":                  # 품목명 없이 자동 발굴: arg = 방향 힌트(없으면 "") — discover가 검증한 값
+        cwd, python, timeout = agent_spec("discover")
+        return [python, "supplier_agent.py", "--count", str(DISCOVER_COUNT), "--no-open"] + (
+            ["--hint", arg] if arg else []), cwd, timeout
     if kind == "sourcing":                  # arg = (품목 번호, 구매 방식[, 국가]) — select가 검증한 값
-        pid, mode, country = (*arg, "China")[:3] if isinstance(arg, tuple) else (arg, "small_batch", "China")
+        pid, mode, country = (*arg, None)[:3] if isinstance(arg, tuple) else (arg, "small_batch", None)
         if mode not in PURCHASE_MODES:
             raise ValueError(f"구매 방식: {mode!r}")
-        if country not in COUNTRIES:
+        if country is not None and country not in COUNTRIES:
             raise ValueError(f"국가: {country!r}")
         cwd, python, timeout = agent_spec("sourcing")
         cmd = [python, "-m", "sourcing_agent", "from-db", str(int(pid)), "--type", mode]
-        return cmd + (["--country", country] if country != "China" else []), cwd, timeout   # 중국은 2번 기본값
+        return cmd + (["--country", country] if country else []), cwd, timeout   # 없으면 2번이 1번 추천 국가로
     if kind == "buysearch":                 # 구매대행: arg = (검색어, 카테고리[, 사이트]) — buy_search가 검증한 값
         q, cat, market = (*arg, "rakuten")[:3]
         if market not in BUY_MARKETS:
@@ -98,7 +103,7 @@ def job_command(kind, arg):
     raise ValueError(kind)
 
 
-KIND_AGENT = {"research": "discover", "sourcing": "sourcing", "neg": "negotiation", "buysearch": "buyagent"}
+KIND_AGENT = {"research": "discover", "discover": "discover", "sourcing": "sourcing", "neg": "negotiation", "buysearch": "buyagent"}
 BUYSEARCH_TIMEOUT = 5                                   # 분 (라쿠텐 검색 페이지 2장 + 크롬 실행)
 # 직접 검색 사이트 = buyagent --market (buyagent main.py SEARCH_MARKETS와 같은 값). 타오바오·1688은 화면에서 링크만
 BUY_MARKETS = buying.BUY_MARKETS
@@ -251,6 +256,18 @@ def research(conn, body):
     return 200, job_view(start_job("research", q, f"1번 조사: {q}"))
 
 
+def discover(conn, body):
+    """품목명 없이 1번 자동 발굴 (웹 검색 + 네이버 검색량으로 후보 10개). hint는 선택."""
+    hint = " ".join(str(body.get("hint") or "").split())
+    if len(hint) > MAX_QUERY:
+        return 400, {"error": f"방향은 {MAX_QUERY}자 이내로 입력해 주세요."}
+    reason = busy_reason(conn, "discover")
+    if reason:
+        return 409, {"error": reason}
+    label = f"1번 자동 발굴 ({hint})" if hint else "1번 자동 발굴"
+    return 200, job_view(start_job("discover", hint, label, anchor="a1"))
+
+
 def select(conn, body):
     try:
         pid = int(body.get("product_id"))
@@ -259,12 +276,12 @@ def select(conn, body):
     mode = body.get("mode") or "small_batch"
     if mode not in PURCHASE_MODES:
         return 400, {"error": f"구매 방식은 {', '.join(PURCHASE_MODES)} 중 하나여야 합니다."}
-    country = body.get("country") or "China"
-    if country not in COUNTRIES:
-        return 400, {"error": f"국가는 {', '.join(COUNTRIES)} 중 하나여야 합니다."}
-    row = conn.execute("SELECT name, stage FROM products WHERE id = ?", (pid,)).fetchone()
+    row = conn.execute("SELECT name, stage, source_country FROM products WHERE id = ?", (pid,)).fetchone()
     if row is None:
         return 404, {"error": f"품목 번호 {pid}가 없습니다."}
+    country = body.get("country") or row["source_country"] or "China"     # 고른 나라 > 1번 추천 > 중국
+    if country not in COUNTRIES:
+        return 400, {"error": f"국가는 {', '.join(COUNTRIES)} 중 하나여야 합니다."}
     if row["stage"] not in ("candidate", "sourcing"):
         return 400, {"error": f"#{pid}는 이미 {dashboard.STAGE_LABEL.get(row['stage'], row['stage'])} 단계입니다."}
     reason = busy_reason(conn, "sourcing")
@@ -563,7 +580,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError
         except ValueError:
             return self._send(400, {"error": "요청 형식 오류"})
-        route = {"/api/research": research, "/api/select": select,
+        route = {"/api/research": research, "/api/discover": discover, "/api/select": select,
                  "/api/neg": negotiation, "/api/buysearch": buy_search,
                  "/api/translate": buy_translate, "/api/buywatch": buy_watch}.get(urlparse(self.path).path)
         if not route:

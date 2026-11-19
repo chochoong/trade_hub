@@ -71,6 +71,8 @@ CREATE TABLE IF NOT EXISTS products (
     image_url          TEXT,                  -- 확정 대표 사진: 직접 업로드했거나 공급사 사진 중 고른 것만  [v2]
                                               --   http(s) URL 또는 DB 폴더 기준 상대경로(images/16.jpg)
                                               --   검색으로 찾은 '참고 이미지'는 저장하지 않는다 (화면에만 표시)
+    source_country     TEXT,                  -- 추천 공급 국가 (China/Japan = 2번 --country 값). 1번이 추천, 2번 기본값  [v10]
+    source_country_reason TEXT,               -- 그 나라를 추천한 이유 (1번)  [v10]
     notes              TEXT,                  -- 사람이 적는 메모
     created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime')),
     updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime'))

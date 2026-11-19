@@ -84,6 +84,24 @@ def test_research_runs_agent_and_reports_product(srv, conn):
     assert conn.execute("SELECT name FROM products WHERE id = ?", (done["product_id"],)).fetchone()[0] == "캠핑 랜턴"
 
 
+def test_discover_runs_without_product_name(srv):
+    code, job = call(srv + "/api/discover", {})                          # 품목명 없이 자동 발굴
+    assert code == 200 and job["label"] == "1번 자동 발굴" and job["anchor"] == "a1"
+    assert wait_job(srv, job["id"])["status"] == "done"
+    code, job = call(srv + "/api/discover", {"hint": " 주방  수납 "})
+    assert code == 200 and job["label"] == "1번 자동 발굴 (주방 수납)"
+    wait_job(srv, job["id"])
+    assert call(srv + "/api/discover", {"hint": "가" * 101})[0] == 400
+
+
+def test_discover_command(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "agent_spec", lambda agent: (tmp_path, "py", 30))
+    cmd, _, _ = ORIGINAL_JOB_COMMAND("discover", "")
+    assert cmd == ["py", "supplier_agent.py", "--count", "10", "--no-open"]
+    cmd, _, _ = ORIGINAL_JOB_COMMAND("discover", "겨울 시즌")
+    assert cmd[-2:] == ["--hint", "겨울 시즌"]
+
+
 def test_select_moves_stage_then_runs_sourcing(srv, conn):
     with conn:
         pid = db.upsert_product(conn, "키캡")
@@ -135,6 +153,12 @@ def test_select_passes_purchase_mode(srv, conn, monkeypatch):
                     ("sourcing", (a, "retail", "Japan"))]
     assert call(srv + "/api/select", {"product_id": a, "mode": "oem; rm -rf"})[0] == 400   # 정해진 값만
     assert call(srv + "/api/select", {"product_id": a, "country": "Korea"})[0] == 400
+    with conn:                                                                  # 국가를 안 보내면 1번 추천 국가
+        c = db.upsert_product(conn, "빈티지 필름 카메라", source_country="USA")
+    seen.clear()
+    code, job = call(srv + "/api/select", {"product_id": c})
+    assert code == 200 and "(미국)" in job["label"] and seen == [("sourcing", (c, "small_batch", "USA"))]
+    wait_job(srv, job["id"])
 
 
 def test_job_command_builds_type_flag(monkeypatch, tmp_path):
@@ -145,7 +169,9 @@ def test_job_command_builds_type_flag(monkeypatch, tmp_path):
     with pytest.raises(ValueError):
         real("sourcing", (7, "oem"))                                             # 대시보드에서는 retail·small_batch만
     assert real("sourcing", (7, "retail", "Japan"))[0][-4:] == ["--type", "retail", "--country", "Japan"]
-    assert "--country" not in real("sourcing", (7, "retail", "China"))[0]       # 중국은 2번 기본값
+    assert real("sourcing", (7, "retail", "China"))[0][-2:] == ["--country", "China"]   # 고른 나라는 항상 넘김
+    assert "--country" not in real("sourcing", (7, "retail"))[0]                # 안 고르면 2번이 1번 추천 국가로
+    assert real("sourcing", (7, "small_batch", "USA"))[0][-2:] == ["--country", "USA"]
     with pytest.raises(ValueError):
         real("sourcing", (7, "retail", "Korea"))
 

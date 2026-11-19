@@ -261,13 +261,25 @@ def candidate_rows(conn):
 
 
 MODE_BUTTONS = (("retail", "구매대행"), ("small_batch", "소량 사입"))
-COUNTRIES = (("China", "중국"), ("Japan", "일본"))          # 2번 sourcing_agent --country 값
+COUNTRIES = tuple(db.SOURCE_COUNTRIES.items())          # 2번 sourcing_agent --country 값
 
 
-def country_select():
-    """[공급처 찾기] 버튼 옆 국가 선택 (같은 묶음의 버튼이 이 값을 함께 보냄)."""
-    opts = "".join(f'<option value="{k}">{n}</option>' for k, n in COUNTRIES)
-    return f'<select class="country" title="어느 나라 공급처를 찾을지">{opts}</select>'
+def _field(p, key):
+    try:
+        return p[key]
+    except (IndexError, KeyError):
+        return None
+
+
+def country_select(p=None):
+    """[공급처 찾기] 버튼 옆 국가 선택 (같은 묶음의 버튼이 이 값을 함께 보냄).
+    1번이 추천한 국가(source_country)를 미리 고르고 '(추천)'을 붙인다. 추천이 없으면 중국."""
+    rec = _field(p, "source_country") if p is not None else None
+    why = _field(p, "source_country_reason") if p is not None else None
+    opts = "".join(f'<option value="{k}"{" selected" if k == rec else ""}>{n}{" (추천)" if k == rec else ""}</option>'
+                   for k, n in COUNTRIES)
+    title = f"1번 추천: {db.SOURCE_COUNTRIES.get(rec, rec)} — {why}" if rec and why else "어느 나라 공급처를 찾을지"
+    return f'<select class="country" title="{e(title)}">{opts}</select>'
 
 
 def actions(p):
@@ -275,7 +287,7 @@ def actions(p):
     name = e(p["name"])
     btns = "".join(f'<button type="button" class="btn primary" data-act="select" data-id="{p["id"]}" data-name="{name}" '
                    f'data-mode="{mode}" data-mode-label="{label}">{label}용 찾기</button>' for mode, label in MODE_BUTTONS)
-    return (f'<div class="acts">{country_select()}{btns}'
+    return (f'<div class="acts">{country_select(p)}{btns}'
             f'<button type="button" class="btn" data-act="research" data-q="{name}">다시 조사</button></div>')
 
 
@@ -284,7 +296,7 @@ def sourcing_button(p, modes_found):
     if not SERVER["on"] or p["stage"] != "sourcing":
         return ""
     name = e(p["name"])
-    return ' <span class="acts">' + country_select() + "".join(
+    return ' <span class="acts">' + country_select(p) + "".join(
         f'<button type="button" class="btn{"" if mode in modes_found else " primary"}" data-act="select" data-id="{p["id"]}" '
         f'data-name="{name}" data-mode="{mode}" data-mode-label="{label}">{label}용 {"다시 " if mode in modes_found else ""}찾기</button>'
         for mode, label in MODE_BUTTONS) + "</span>"
@@ -480,6 +492,13 @@ border-radius:8px 0 0 8px;background:var(--card);color:var(--fg)}
 .sgo{flex:none;display:flex;align-items:center;justify-content:center;width:42px;border:1px solid var(--accent);
 border-radius:0 8px 8px 0;background:var(--accent);color:#fff;cursor:pointer}
 .sgo:hover{filter:brightness(1.1)}.sgo:focus-visible{outline:2px solid var(--fg);outline-offset:2px}
+.snew{flex:none;margin-left:6px;padding:0 12px;border:1px solid var(--accent);border-radius:8px;background:var(--card);
+color:var(--accent);font:inherit;font-weight:600;cursor:pointer;white-space:nowrap}
+.snew:hover{background:var(--accent);color:#fff}
+.discover-run{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0 0 14px}
+.discover-run input{flex:1 1 260px;min-width:0;font:inherit;padding:7px 12px;border:1px solid var(--line);border-radius:8px;
+background:var(--card);color:var(--fg)}
+.discover-run .snew{margin-left:0;padding:7px 14px}.snew:focus-visible{outline:2px solid var(--fg);outline-offset:2px}
 .results{position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:10;background:var(--card);border:1px solid var(--line);
 border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.15);overflow:hidden}
 .hit{display:block;width:100%;text-align:left;padding:8px 12px;border:0;border-bottom:1px solid var(--line);background:none;
@@ -892,7 +911,12 @@ def agent_body(conn, agent):
     """에이전트별 페이지의 본문 섹션들."""
     if agent == "discover":
         html, n = candidate_rows(conn)
-        return [section("후보 품목", html, f"{n}개 · 다음 단계로: trade_hub select &lt;번호&gt; · 검색량은 '텀블러'=100"),
+        run = ('<div class="discover-run"><input id="discover-hint" type="text" maxlength="100" '
+               'placeholder="방향 (선택) 예: 주방·수납, 1만~3만원대, 겨울 시즌" aria-label="자동 발굴 방향">'
+               '<button type="button" id="auto-discover" class="snew">자동 발굴 실행</button>'
+               '<span class="muted small">품목 이름 없이 웹 검색·네이버 검색량으로 후보 10개 · 10~20분 · API 비용</span></div>'
+               if SERVER["on"] else "")
+        return [run + section("후보 품목", html, f"{n}개 · 다음 단계로: trade_hub select &lt;번호&gt; · 검색량은 '텀블러'=100"),
                 moved_on(conn), dropped(conn)]
     if agent == "sourcing":
         html, n = products_in_progress(conn)
@@ -968,6 +992,23 @@ document.getElementById("q-go").addEventListener("click", function () {   // 돋
   var hits = list.querySelectorAll("a.hit");
   if (hits.length === 1) { hits[0].click(); return; }                     // 딱 하나면 바로 그 품목으로
   box.focus();
+});
+var rb = document.getElementById("q-research");                          // 서버 모드: 항상 보이는 [새로 조사]
+if (rb) rb.addEventListener("click", function () {
+  var q = box.value.trim();
+  if (!q) { autoDiscover(""); return; }                                // 검색어 없으면 자동 발굴
+  if (confirm("「" + q + "」을(를) 1번 에이전트로 조사할까요? (1~3분 · API 비용)")) startJob("/api/research", {query: q});
+});
+function autoDiscover(hint) {
+  var msg = "품목 이름 없이 1번 에이전트 자동 발굴을 실행할까요?\\n웹 검색과 네이버 검색량으로 수요는 있고 경쟁은 적은 후보 10개를 찾습니다."
+    + (hint ? "\\n방향: " + hint : "") + "\\n(10~20분 · API 비용)";
+  if (confirm(msg)) startJob("/api/discover", {hint: hint});
+}
+document.addEventListener("click", function (ev) {                        // 1번 페이지 [자동 발굴 실행]
+  var b = ev.target.closest("#auto-discover");
+  if (!b) return;
+  var h = document.getElementById("discover-hint");
+  autoDiscover(h ? h.value.trim() : "");
 });
 document.addEventListener("click", function (ev) { if (!ev.target.closest(".search")) list.hidden = true; });
 list.addEventListener("click", function (ev) { if (ev.target.closest("a.hit")) list.hidden = true; });
@@ -1195,7 +1236,7 @@ def _render(conn, server):
 <div class="search"><div class="sbox"><input id="q" type="search" autocomplete="off" aria-label="품목 검색"
   placeholder="품목 검색{' · 없으면 새로 조사' if server else ''} (예: 무선 기계식 키보드)"><button type="button" id="q-go"
   class="sgo" title="검색" aria-label="검색"><svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
-  stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></button></div>
+  stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg></button>{'<button type="button" id="q-research" class="snew" title="입력한 품목을 1번 에이전트로 새로 조사 · 비워 두고 누르면 자동 발굴(후보 10개)">새로 조사</button>' if server else ''}</div>
 <div id="q-results" class="results" hidden></div></div>
 <span class="muted small">{now} 기준 · {'서버 모드 (새로고침하면 최신)' if server else '최신화: <code>trade_hub dashboard</code> · 조사 실행은 <code>trade_hub serve</code>'}</span></header>
 {nav(conn)}
