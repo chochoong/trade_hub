@@ -449,3 +449,36 @@ def test_sourcing_runs_in_parallel(srv, conn, monkeypatch, tmp_path):
     assert server.sourcing_busy_reason(conn, b, "small_batch") is None
     assert "같은 구매 방식" in server.sourcing_busy_reason(conn, d, "small_batch")
     assert server.sourcing_busy_reason(conn, d, "retail") is None
+
+
+def test_stop_job(srv, conn, monkeypatch, tmp_path):
+    """중지: 프로세스 종료 → '중지됨', 남은 agent_runs는 실패로, 후보에서 넘긴 품목은 후보로 되돌림."""
+    monkeypatch.setattr(server, "job_command",
+                        lambda kind, arg: ([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path, 1))
+    with conn:
+        a = db.upsert_product(conn, "문풍지")
+        b = db.upsert_product(conn, "키캡", stage="sourcing")
+    code, job = call(srv + "/api/select", {"product_id": a, "mode": "small_batch"})
+    assert code == 200
+    with conn:   # 2번이 시작하며 남기는 실행 기록 흉내 (강제 종료라 running으로 남음)
+        mine = conn.execute("INSERT INTO agent_runs (agent, status, args_json) VALUES ('sourcing', 'running', ?)",
+                            (json.dumps({"ids": [a], "sourcing_type": "small_batch"}),)).lastrowid
+        other = conn.execute("INSERT INTO agent_runs (agent, status, args_json) VALUES ('sourcing', 'running', ?)",
+                             (json.dumps({"ids": [b], "sourcing_type": "retail"}),)).lastrowid
+    code, out = call(srv + "/api/stop", {"id": job["id"]})
+    assert code == 200 and out["status"] == "cancelled"
+    assert wait_job(srv, job["id"])["status"] == "cancelled"
+    status = dict(conn.execute("SELECT id, status FROM agent_runs").fetchall())
+    assert status[mine] == "failed" and status[other] == "running"          # 같이 돌던 다른 품목 기록은 그대로
+    assert conn.execute("SELECT stage FROM products WHERE id = ?", (a,)).fetchone()[0] == "candidate"
+    assert call(srv + "/api/stop", {"id": job["id"]})[0] == 400              # 이미 끝남
+    assert call(srv + "/api/stop", {"id": "없음"})[0] == 404
+    code, job = call(srv + "/api/select", {"product_id": b, "mode": "small_batch"})  # 이미 공급처 발굴 단계면 그대로
+    assert code == 200
+    assert call(srv + "/api/stop", {"id": job["id"]})[0] == 200
+    assert conn.execute("SELECT stage FROM products WHERE id = ?", (b,)).fetchone()[0] == "sourcing"
+
+
+def test_job_panel_has_stop_button():
+    from trade_hub import dashboard
+    assert 'data-stop="' in dashboard.SERVER_JS and '"/api/stop"' in dashboard.SERVER_JS

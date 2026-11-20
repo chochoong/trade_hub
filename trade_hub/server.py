@@ -246,6 +246,7 @@ def start_job(kind, arg, label, product_id=None, anchor=None, key=None):
                     env[name] = key
     proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             stdin=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace")
+    job["proc"] = proc
     with LOCK:
         JOBS[job_id] = job
     threading.Thread(target=_watch, args=(job, proc, timeout), daemon=True).start()
@@ -283,9 +284,57 @@ def _watch(job, proc, timeout):
     timer.cancel()
     with LOCK:
         job["exit_code"], job["ended"] = code, time.time()
-        job["status"] = "done" if code == 0 else "failed"
-        if job.get("timed_out"):
+        job["status"] = "cancelled" if job.get("cancelled") else "done" if code == 0 else "failed"
+        if job.get("cancelled"):
+            job["lines"] = (job["lines"] + ["사람이 중지했습니다"])[-6:]
+        elif job.get("timed_out"):
             job["lines"] = (job["lines"] + [f"제한 시간 {timeout}분 초과로 중단했습니다"])[-6:]
+
+
+def _stopped_runs(conn, job):
+    """중지한 작업이 남긴 agent_runs(강제 종료라 'running'으로 남음)를 실패로 정리한다.
+    안 하면 같은 품목·에이전트가 제한 시간 동안 '실행 중'으로 막힌다. 병렬 2번은 품목·구매 방식으로 구별."""
+    since = datetime.fromtimestamp(job["started"] - 2).strftime("%Y-%m-%dT%H:%M:%S")
+    ids = []
+    for row in conn.execute("SELECT id, args_json FROM agent_runs WHERE agent = ? AND status = 'running' AND started_at >= ?",
+                            (job["agent"], since)):
+        if job.get("key"):
+            try:
+                args = json.loads(row["args_json"] or "{}") or {}
+            except ValueError:
+                args = {}
+            pid, mode = job["key"]
+            if pid not in (args.get("ids") or []) or args.get("sourcing_type", "small_batch") != mode:
+                continue
+        ids.append(row["id"])
+    return ids
+
+
+def stop(conn, body):
+    """실행 중인 작업을 중지한다 (자식 프로세스까지 종료). 2번 공급처 찾기로 후보 → 공급처 발굴로 넘긴 품목은
+    공급처가 하나도 저장되지 않았으면 후보로 되돌린다 (안 그러면 슈퍼바이저가 다음 정시에 2번을 자동으로 다시 돌림)."""
+    with LOCK:
+        job = JOBS.get(str(body.get("id") or ""))
+    if job is None:
+        return 404, {"error": "없는 작업입니다."}
+    if job["status"] != "running":
+        return 400, {"error": "이미 끝난 작업입니다."}
+    job["cancelled"] = True
+    _kill(job["proc"])
+    with conn:
+        for run_id in _stopped_runs(conn, job):
+            conn.execute("UPDATE agent_runs SET status = 'failed', error = ?, finished_at = ? WHERE id = ?",
+                         ("사람이 대시보드에서 중지", db.now(), run_id))
+        pid = job.get("revert_stage")
+        if pid:
+            row = conn.execute("SELECT stage FROM products WHERE id = ?", (pid,)).fetchone()
+            has = conn.execute("SELECT 1 FROM product_suppliers WHERE product_id = ? LIMIT 1", (pid,)).fetchone()
+            if row and row["stage"] == "sourcing" and not has:
+                db.set_stage(conn, pid, "candidate", note="공급처 찾기 중지 → 후보로 되돌림 (대시보드)")
+    with LOCK:
+        job["status"] = "cancelled"
+        job["ended"] = job["ended"] or time.time()
+    return 200, job_view(job)
 
 
 def job_view(j):
@@ -358,9 +407,12 @@ def select(conn, body):
     if row["stage"] == "candidate":           # 사람이 버튼으로 결정 → 단계 이동 (trade_hub select와 같음)
         with conn:
             db.set_stage(conn, pid, "sourcing", note="사람이 선정 → 공급처 발굴로 (대시보드)")
-    return 200, job_view(start_job("sourcing", (pid, mode, country),
-                                   f"2번 {PURCHASE_MODES[mode]}용 공급처 찾기 ({COUNTRIES[country]}): #{pid} {row['name']}",
-                                   product_id=pid, key=(pid, mode)))
+    job = start_job("sourcing", (pid, mode, country),
+                    f"2번 {PURCHASE_MODES[mode]}용 공급처 찾기 ({COUNTRIES[country]}): #{pid} {row['name']}",
+                    product_id=pid, key=(pid, mode))
+    if row["stage"] == "candidate":
+        job["revert_stage"] = pid             # 중지하면 후보로 되돌릴 품목
+    return 200, job_view(job)
 
 
 def compliance(conn, body):
@@ -700,7 +752,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError
         except ValueError:
             return self._send(400, {"error": "요청 형식 오류"})
-        route = {"/api/research": research, "/api/discover": discover, "/api/select": select, "/api/compliance": compliance,
+        route = {"/api/research": research, "/api/discover": discover, "/api/select": select, "/api/compliance": compliance, "/api/stop": stop,
                  "/api/neg": negotiation, "/api/buysearch": buy_search,
                  "/api/translate": buy_translate, "/api/buywatch": buy_watch}.get(urlparse(self.path).path)
         if not route:

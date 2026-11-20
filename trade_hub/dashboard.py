@@ -545,7 +545,9 @@ background:var(--card);border:1px solid var(--line);border-radius:12px;box-shado
 .jobs .x:hover{background:var(--accent-soft);color:var(--fg)}.job>.x{position:absolute;top:4px;right:0}
 .jobs-head{display:flex;justify-content:space-between;align-items:center;padding-bottom:4px;border-bottom:1px solid var(--line)}
 .job pre{margin:4px 0 0;font-size:11px;white-space:pre-wrap;color:var(--muted);max-height:96px;overflow:auto}
-.job.failed b{color:var(--bad)}.job.done b{color:var(--ok)}
+.job.failed b{color:var(--bad)}.job.done b{color:var(--ok)}.job.cancelled b{color:var(--muted)}
+.jobs .stop{border:1px solid var(--bad);background:none;color:var(--bad);cursor:pointer;font:inherit;font-size:11px;
+padding:0 8px;border-radius:6px;margin-left:6px}.jobs .stop:hover{background:var(--bad);color:var(--card)}
 .intro{display:flex;gap:16px;align-items:flex-start}.intro h2{margin-bottom:6px}.intro ul{margin:0 0 6px;padding-left:18px}
 .intro-no{flex:none;width:44px;height:44px;border-radius:12px;background:var(--accent-soft);color:var(--accent);
 font-size:22px;font-weight:800;display:flex;align-items:center;justify-content:center}
@@ -1413,10 +1415,12 @@ function poll() {
     panel.innerHTML = (shown.length > 1 ? '<div class="jobs-head"><span class="small muted">작업 ' + shown.length +
         '개</span><button type="button" class="x" data-close="all" title="모두 닫기" aria-label="모두 닫기">모두 닫기 ✕</button></div>' : "") +
       shown.map(function (j) {
-      var st = {running: "⏳ 실행 중", done: "✅ 완료", failed: "❌ 실패"}[j.status] || j.status;
+      var st = {running: "⏳ 실행 중", done: "✅ 완료", failed: "❌ 실패", cancelled: "⏹ 중지됨"}[j.status] || j.status;
+      var stopBtn = j.status === "running" ? ' <button type="button" class="stop" data-stop="' + esc(j.id) +
+        '" title="이 작업을 중간에 멈춥니다">■ 중지</button>' : "";
       var go = jobTarget(j) && j.status === "done" ? ' <a href="' + esc(jobTarget(j)) + '" class="go" data-reload="1">결과 보기</a>' : "";
       return '<div class="job ' + j.status + '"><button type="button" class="x" data-close="' + esc(j.id) +
-        '" title="닫기" aria-label="닫기">✕</button><b>' + esc(j.label) + '</b> <span class="small">' + st + ' · ' + esc(j.elapsed) + go +
+        '" title="닫기" aria-label="닫기">✕</button><b>' + esc(j.label) + '</b> <span class="small">' + st + ' · ' + esc(j.elapsed) + go + stopBtn +
         '</span><pre>' + esc(j.lines.join("\\n")) + '</pre></div>';
     }).join("");
     lastJobs = jobs;
@@ -1424,6 +1428,7 @@ function poll() {
       if (mine[j.id] && j.status !== "running") {
         delete mine[j.id];
         if (j.status === "done") { location.hash = jobTarget(j) || location.hash; location.reload(); }
+        else if (j.status === "cancelled" && j.kind === "sourcing") location.reload();   // 후보로 되돌린 단계 반영
       }
     });
     clearTimeout(timer);
@@ -1431,6 +1436,14 @@ function poll() {
   }).catch(function () { clearTimeout(timer); timer = setTimeout(poll, 5000); });
 }
 panel.addEventListener("click", function (ev) {
+  var sb = ev.target.closest("button[data-stop]");
+  if (sb) {                                   // 작업 중지 (프로세스 종료). 그때까지 쓴 API 비용은 돌아오지 않음
+    var job = lastJobs.filter(function (j) { return j.id === sb.dataset.stop; })[0];
+    if (!confirm((job ? job.label + "\\n" : "") + "이 작업을 중지할까요? 지금까지 조사한 내용은 저장되지 않습니다.")) return;
+    sb.disabled = true;
+    api("/api/stop", {id: sb.dataset.stop}).then(poll).catch(function (err) { alert(err.message); poll(); });
+    return;
+  }
   var x = ev.target.closest("button[data-close]");
   if (x) {                                    // 알림만 닫음 — 실행 중인 작업은 멈추지 않음
     if (x.dataset.close === "all") lastJobs.forEach(function (j) { closedJobs[j.id] = true; });
