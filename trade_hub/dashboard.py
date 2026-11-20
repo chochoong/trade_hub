@@ -951,7 +951,9 @@ def message_item(m, waiting=None, can_follow=False, to_default=""):
             to_input = (f'<input type="text" name="to" value="{e(to_default or "")}" size="26" '
                         'placeholder="공급처 메일 없음 — 입력 (쉼표로 여러 명)" autocomplete="email">')
             if m["external_draft_id"]:       # Gmail 임시보관함에 있음 → Gmail에서 보내면 동기화 때 '보냄'으로 바뀜
-                acts.append('<span class="small ok">📨 Gmail 임시보관함에 있음 — Gmail에서 직접 보내세요</span>')
+                acts.append('<span class="small ok">📨 Gmail 임시보관함에 있음 — Gmail에서 직접 보내세요</span> '
+                            '<a class="btn" href="https://mail.google.com/mail/u/0/#drafts" target="_blank" '
+                            'rel="noopener">Gmail 열기 ↗</a>')
                 acts.append(neg_form("gmail_draft", {"message_id": m["id"]},
                                      to_input + '<button class="btn">받는 사람 바꾸기</button>',
                                      confirm="Gmail 임시보관함 초안의 받는 사람을 바꿀까요? "
@@ -1070,7 +1072,10 @@ def supplier_thread(conn, s):
                   '<option>EXW</option><option>CIF</option><option>DDP</option></select></label>'
                   f'<label>언어 <select name="lang">{LANG_OPTS}</select></label></div>'
                   '<input name="note" maxlength="500" placeholder="추가 요청 (예: 로고 인쇄 가능 여부)">'
-                  '<button class="btn primary">초안 만들기</button>'
+                  '<div class="row"><button class="btn primary">초안 만들기</button>'
+                  + ('' if supplier_emails(s) else    # 연락처 칸에 메일 주소가 없을 때만 (있으면 받는 사람 자동 입력)
+                     ' <span class="small warn">⚠️ 공급처 메일 없음 — Gmail에 넣을 때 받는 사람을 직접 입력하세요</span>')
+                  + '</div>'
                   '<div class="small muted">2번이 정리한 첫 문의 질문·확인 못 한 항목·필요 인증을 함께 묻습니다.</div>',
                   cls="stack") + "</details>")
     if SERVER["on"] and msgs:
@@ -1419,6 +1424,7 @@ function poll() {
       var stopBtn = j.status === "running" ? ' <button type="button" class="stop" data-stop="' + esc(j.id) +
         '" title="이 작업을 중간에 멈춥니다">■ 중지</button>' : "";
       var go = jobTarget(j) && j.status === "done" ? ' <a href="' + esc(jobTarget(j)) + '" class="go" data-reload="1">결과 보기</a>' : "";
+      if (j.open_url && j.status === "done") go += ' <a href="' + esc(j.open_url) + '" target="_blank" rel="noopener">Gmail 열기 ↗</a>';
       return '<div class="job ' + j.status + '"><button type="button" class="x" data-close="' + esc(j.id) +
         '" title="닫기" aria-label="닫기">✕</button><b>' + esc(j.label) + '</b> <span class="small">' + st + ' · ' + esc(j.elapsed) + go + stopBtn +
         '</span><pre>' + esc(j.lines.join("\\n")) + '</pre></div>';

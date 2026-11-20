@@ -272,6 +272,11 @@ def _watch(job, proc, timeout):
                 except ValueError:
                     pass
                 continue
+            if line.startswith("RESULT_URL="):     # 5번: 끝나면 새 탭으로 열 주소 (Gmail만 허용)
+                url = line.split("=", 1)[1].strip()
+                if url.startswith("https://mail.google.com/") and not any(c in url for c in "\"'<> "):
+                    job["open_url"] = url
+                continue
             if line.startswith("RESULT_ANCHOR="):  # 5번: 끝나면 이동할 화면 위치 (예: ps-12)
                 anchor = line.split("=", 1)[1].strip()
                 if anchor.replace("-", "").isalnum():
@@ -339,7 +344,7 @@ def stop(conn, body):
 
 def job_view(j):
     sec = int((j["ended"] or time.time()) - j["started"])
-    return {k: j.get(k) for k in ("id", "kind", "label", "status", "product_id", "anchor", "lines", "exit_code")} | {
+    return {k: j.get(k) for k in ("id", "kind", "label", "status", "product_id", "anchor", "lines", "exit_code", "open_url")} | {
         "elapsed": f"{sec // 60}분 {sec % 60}초" if sec >= 60 else f"{sec}초"}
 
 

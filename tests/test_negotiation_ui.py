@@ -93,6 +93,24 @@ def test_reply_goes_through_file_and_job_reports_anchor(srv, conn, monkeypatch):
                 {"X-Trade-Hub": "0"})[0] == 403
 
 
+
+def test_gmail_draft_job_reports_gmail_url_only(srv, conn, monkeypatch):
+    ids = seed(conn)
+    out = {"url": "https://mail.google.com/mail/u/0/?authuser=a%40b.com#drafts?compose=abc"}
+
+    def fake_command(kind, arg):
+        return [sys.executable, "-c", f"print('RESULT_URL={out['url']}')"], ".", 1
+
+    monkeypatch.setattr(server, "job_command", fake_command)
+    code, job = call(srv + "/api/neg", {"action": "gmail_draft", "message_id": ids["draft"]})
+    assert code == 200, job
+    assert wait_job(srv, job["id"])["open_url"] == out["url"]
+    out["url"] = "https://evil.example/#drafts"                  # Gmail 주소가 아니면 열지 않음
+    code, job = call(srv + "/api/neg", {"action": "gmail_draft", "message_id": ids["draft"]})
+    assert wait_job(srv, job["id"])["open_url"] is None
+    html = dashboard.render(conn, server=True)
+    assert "Gmail 열기" in html and "window.open" not in html                 # 자동으로 열지 않음 — 링크를 눌러야 열림
+
 def test_job_command_uses_negotiation_config():
     cmd, cwd, timeout = server.job_command("neg", ["auto"])
     cfg = json.loads(server.CONFIG.read_text(encoding="utf-8"))["agents"]["negotiation"]
@@ -149,3 +167,15 @@ def test_sample_and_supplier_buttons_and_args(conn):
     except server.BadRequest:
         return
     raise AssertionError("알 수 없는 공급처 처리는 막아야 함")
+
+
+def test_rfq_form_warns_only_when_supplier_has_no_email(conn):
+    ids = seed(conn)
+    warn = "공급처 메일 없음 — Gmail에 넣을 때"
+    html = dashboard.render(conn, server=True)
+    block = html.split(f'id="ps-{ids["other"]}"')[1].split('class="neg"')[0]
+    assert "견적 요청 초안" in block and warn in block                     # Other Co: 메일 없음 → 표시
+    with conn:
+        conn.execute("UPDATE suppliers SET contact_other = 'WeChat x / b@other.cn' WHERE company = 'Other Co'")
+    html = dashboard.render(conn, server=True)
+    assert warn not in html.split(f'id="ps-{ids["other"]}"')[1].split('class="neg"')[0]   # 메일 있으면 표시 안 함
