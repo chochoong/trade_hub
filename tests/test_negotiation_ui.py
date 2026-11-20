@@ -124,3 +124,28 @@ def test_recipient_prefilled_from_contact_fields():
     s = {"contact_email": "info@beyondcase.com / fiona@beyondcase.com", "contact_other": "WeChat x · 메일 Sales@Beyond.cn."}
     assert dashboard.supplier_emails(s) == "info@beyondcase.com, fiona@beyondcase.com, sales@beyond.cn"
     assert dashboard.supplier_emails({"contact_email": None, "contact_other": "Alibaba 메시지만"}) == ""
+
+
+def test_sample_and_supplier_buttons_and_args(conn):
+    ids = seed(conn)
+    html = dashboard.render(conn, server=True)
+    assert 'value="sample"' in html and "샘플 요청 초안" in html
+    assert 'name="what" value="select"' in html and 'name="what" value="reject"' in html
+    ps_id = conn.execute("SELECT product_supplier_id FROM messages WHERE id = ?", (ids["draft"],)).fetchone()[0]
+    assert server.neg_args(conn, {"action": "sample", "ps_id": ps_id, "qty": "2 pcs"})[0] == ["sample", str(ps_id), "--qty=2 pcs"]
+    assert server.neg_args(conn, {"action": "supplier", "ps_id": ps_id, "what": "reject", "reason": " 비쌈 "})[0] \
+        == ["supplier", str(ps_id), "reject", "--reason=비쌈"]
+    assert server.neg_args(conn, {"action": "supplier", "ps_id": ps_id, "what": "select", "reason": "x"})[0] \
+        == ["supplier", str(ps_id), "select"]
+    with conn:
+        conn.execute("UPDATE product_suppliers SET status = 'rejected', reject_reason = '인증 없음', "
+                     "supplier_specs_json = ? WHERE id = ?",
+                     ('{"flags": {"chemical_product": false, "origin_country": "CN"}}', ps_id))
+    html = dashboard.render(conn, server=True)
+    assert "제외 사유: 인증 없음" in html and "생활화학 아니오 · 생산국 CN" in html
+    assert 'name="what" value="restore"' in html
+    try:
+        server.neg_args(conn, {"action": "supplier", "ps_id": ps_id, "what": "delete"})
+    except server.BadRequest:
+        return
+    raise AssertionError("알 수 없는 공급처 처리는 막아야 함")

@@ -948,6 +948,48 @@ def quote_rows(conn, ps_id):
     return table(heads, out, "tight")
 
 
+def supplier_buttons(s):
+    """공급처 선정 / 제외(사유) / 되돌리기 — LLM 없음 (5번 supplier 명령)."""
+    if not SERVER["on"]:
+        return ""
+    pid = {"ps_id": s["link_id"]}
+    out = ""
+    if s["status"] not in ("selected", "rejected"):
+        out += neg_form("supplier", {**pid, "what": "select"}, '<button class="btn">선정</button>',
+                        confirm="이 공급처로 진행할까요? (다른 공급처는 그대로 둡니다)", cls="inline")
+    if s["status"] != "rejected":
+        out += ('<details><summary class="btn">제외</summary>' + neg_form("supplier", {**pid, "what": "reject"},
+                '<input name="reason" maxlength="300" placeholder="제외 사유 (예: 단가 높음·인증 서류 없음)">'
+                '<button class="btn">제외하기</button>'
+                '<div class="small muted">제외하면 이 공급처에는 새 초안·자동 후속 메일을 만들지 않습니다.</div>',
+                confirm="이 공급처를 제외할까요?", cls="stack") + "</details>")
+    if s["status"] in ("selected", "rejected"):
+        out += neg_form("supplier", {**pid, "what": "restore"}, '<button class="btn">되돌리기</button>',
+                        confirm="선정·제외를 취소하고 메일·견적 기록대로 되돌릴까요?", cls="inline")
+    return out
+
+
+SPEC_LABEL = {"power_source": "전원", "is_electronic": "전자회로", "has_heating_or_motor": "발열·모터", "wireless": "무선",
+              "food_contact": "식품 접촉", "chemical_product": "생활화학", "hygiene_product": "위생용품", "cosmetic": "화장품",
+              "synthetic_resin_household": "합성수지 생활용품", "textile_wearable": "섬유·착용", "origin_country": "생산국"}
+
+
+def supplier_notes(s):
+    """제외 사유 + 공급처가 답장으로 확인한 사양 (5번이 기록, 3번이 판정에 씀)."""
+    out = ""
+    if s["status"] == "rejected" and s["reject_reason"]:
+        out += f'<div class="small bad">제외 사유: {e(s["reject_reason"])}</div>'
+    try:
+        flags = (json.loads(s["supplier_specs_json"]) or {}).get("flags") or {} if s["supplier_specs_json"] else {}
+    except (ValueError, AttributeError):
+        flags = {}
+    if flags:
+        txt = " · ".join(f'{e(SPEC_LABEL.get(k, k))} {"예" if v is True else "아니오" if v is False else e(v)}'
+                         for k, v in flags.items())
+        out += f'<div class="small">🔎 공급처 답으로 확인한 사양: {txt}</div>'
+    return out
+
+
 def supplier_thread(conn, s):
     msgs = conn.execute("SELECT * FROM messages WHERE product_supplier_id = ? ORDER BY id", (s["link_id"],)).fetchall()
     # 마지막으로 보낸 메일 이후 답장이 없으면 'N일째 답 없음' + (대기 중인 후속 초안이 없으면) 후속 메일 버튼
@@ -980,6 +1022,14 @@ def supplier_thread(conn, s):
                   '<button class="btn primary">저장하고 분석</button>'
                   '<div class="small muted">요약·번역하고, 가격이 있으면 견적표에 넣습니다.</div>',
                   confirm="답장을 저장하고 5번 에이전트로 분석할까요? (수십 초 · API 비용)", cls="stack") + "</details>")
+    if SERVER["on"] and msgs and s["status"] != "rejected":
+        forms += ('<details><summary class="btn">샘플 요청 초안</summary>' + neg_form("sample", {"ps_id": s["link_id"]},
+                  '<div class="frow"><label>수량 <input name="qty" maxlength="60" size="12" placeholder="예: 2 pcs"></label></div>'
+                  '<input name="note" maxlength="500" placeholder="추가 요청 (예: 빨간색·로고 시안 포함)">'
+                  '<button class="btn primary">초안 만들기</button>'
+                  '<div class="small muted">샘플비·배송비·발송 시점·본주문 시 차감 여부를 묻습니다. 보내면 공급처가 \'샘플\' 상태로.</div>',
+                  cls="stack") + "</details>")
+    forms += supplier_buttons(s)
     contact = " · ".join(x for x in (e(s["contact_email"]), e(s["contact_other"])) if x)
     return f"""<div class="neg" id="ps-{s["link_id"]}">
   <div class="neg-head">{'<span class="pick">추천</span> ' if s["is_top_pick"] else ""}<b>{e(s["company"])}</b>
@@ -988,7 +1038,7 @@ def supplier_thread(conn, s):
     <span class="badge">{e(PS_STATUS.get(s["status"], s["status"]))}</span>
     <span class="small">{contact or '<span class="muted">연락처 없음</span>'}</span>
     <span class="right acts row">{forms}</span></div>
-  {items}{quote_rows(conn, s["link_id"])}
+  {supplier_notes(s)}{items}{quote_rows(conn, s["link_id"])}
 </div>"""
 
 
@@ -1002,6 +1052,7 @@ def negotiation_view(conn):
     for p in prods:
         sups = conn.execute("""
             SELECT s.*, ps.id AS link_id, ps.status, ps.is_top_pick, ps.max_order_qty AS ps_max_qty,
+                   ps.reject_reason, ps.supplier_specs_json,
                    (SELECT COUNT(*) FROM messages m WHERE m.product_supplier_id = ps.id) AS n_msgs
             FROM product_suppliers ps JOIN suppliers s ON s.id = ps.supplier_id WHERE ps.product_id = ?
             ORDER BY n_msgs > 0 DESC, ps.is_top_pick DESC, ps.id""", (p["id"],)).fetchall()

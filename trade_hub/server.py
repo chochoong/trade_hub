@@ -445,6 +445,7 @@ NEG_TONES = {"soft": "부드럽게", "normal": "보통", "firm": "강하게"}
 NEG_MARKS = {"approved": "검토 완료", "sent": "발송 완료", "discarded": "버림", "draft": "초안으로 되돌림"}
 INCOTERMS = {"", "EXW", "FOB", "CFR", "CIF", "DAP", "DDP"}
 MAX_REPLY = 20_000
+NEG_SUPPLIER = {"select": "선정", "reject": "제외", "restore": "선정·제외 되돌리기"}
 
 
 class BadRequest(ValueError):
@@ -498,6 +499,20 @@ def neg_args(conn, body):
         args += [f"--note={v}" for v in [_text(body, "note")] if v]
         args += ["--force"] if body.get("force") else []
         return args, f"5번 견적 요청 초안: {ps['company']}"
+    if action == "sample":
+        ps = _row(conn, PS_NAME_SQL, _id(body, "ps_id"), "공급처 연결")
+        args = ["sample", str(ps["id"])] + ([f"--lang={lang}"] if body.get("lang") else [])
+        args += [f"--qty={v}" for v in [_text(body, "qty", 60)] if v]
+        args += [f"--note={v}" for v in [_text(body, "note")] if v]
+        return args, f"5번 샘플 요청 초안: {ps['company']}"
+    if action == "supplier":
+        ps = _row(conn, PS_NAME_SQL, _id(body, "ps_id"), "공급처 연결")
+        what = body.get("what")
+        if what not in NEG_SUPPLIER:
+            raise BadRequest("공급처 처리 값이 올바르지 않습니다.")
+        args = ["supplier", str(ps["id"]), what]
+        args += [f"--reason={v}" for v in [_text(body, "reason", 300)] if v and what == "reject"]
+        return args, f"5번 공급처 {NEG_SUPPLIER[what]}: {ps['company']}"
     if action == "reply":
         ps = _row(conn, PS_NAME_SQL, _id(body, "ps_id"), "공급처 연결")
         text = str(body.get("text") or "").strip()
