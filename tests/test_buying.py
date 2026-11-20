@@ -145,7 +145,11 @@ def test_search_form_only_in_server_mode(ba):
     assert 'value="food"' not in html
     assert 'name="query" required maxlength="100" autocomplete="off" placeholder' in html   # 새로 고침하면 빈 칸 (value 없음)
     assert html.index('data-lang="en"') < html.index('data-lang="ja"') < html.index('data-lang="zh"')
-    assert html.index('value="rakuten"') < html.index('value="aliexpress"') < html.index('value="ebay"') < html.index('value="china"')
+    assert html.index('value="rakuten"') < html.index('value="ebay"') < html.index('value="china"')
+    assert 'value="aliexpress"' not in html and "타오바오·1688(중국어" not in html     # 중국 항목 하나로 합침
+    assert '<option value="china" data-lang="zh">중국(타오바오·1688·알리 · 중국어 · 링크만)</option>' in html
+    assert "알리·이베이는 buyagent에 API 키" not in html and "이베이는 buyagent에 API 키 필요" in html
+    assert 'title="영어로 번역 (이베이용)"' in html and 'title="중국어로 번역 (중국(타오바오·1688·알리) 링크용)"' in html
     assert '<option value="ebay" data-lang="en">이베이(미국·영어로 검색)</option>' in html
 
 
@@ -294,3 +298,15 @@ def test_pause_uses_real_buyagent(ba):
     assert buying.paused_since(ba) and buying.watch_call("status", ba)[1]["paused_since"] == buying.paused_since(ba)
     assert buying.watch_call("pause", ba, paused=False) == (200, {"paused": False})
     assert buying.paused_since(ba) is None
+
+
+def test_china_option_links_only_no_api_search():
+    js = dashboard.SERVER_JS
+    china = js.index('if (body.market === "china") {')
+    branch = js[china:js.index("startJob(\"/api/buysearch\"", china)]
+    assert 'buyTranslate(f, "zh")' in branch and "buyLinks(f, q)" in branch and "return;" in branch   # 중국어로만 번역, API 전에 끝
+    for site in ("https://s.taobao.com/search?q=", "https://s.1688.com/selloffer/offer_search.htm",
+                 "https://www.aliexpress.com/w/wholesale-"):
+        assert site in js
+    assert [k for k, _ in buying.SITE_OPTIONS] == ["rakuten", "ebay", "china"]
+    assert "aliexpress" in buying.BUY_MARKETS                    # 서버 허용 값에는 남김 (화면에서만 안 부름)

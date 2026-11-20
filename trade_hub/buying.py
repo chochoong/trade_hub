@@ -319,14 +319,17 @@ def _latest_section(data):
 
 
 LANG_BUTTONS = [   # (언어, 버튼 이름, 설명) — 번역만 함. 검색할 사이트는 사이트 메뉴가 정함
-    ("en", "영어", "영어로 번역 (알리익스프레스·이베이용)"),
+    ("en", "영어", "영어로 번역 (이베이용)"),
     ("ja", "일본어", "일본어로 번역 (라쿠텐용)"),
-    ("zh", "중국어", "중국어로 번역 (타오바오·1688 링크용)"),
+    ("zh", "중국어", "중국어로 번역 (중국(타오바오·1688·알리) 링크용)"),
 ]
-# 사이트 메뉴: buyagent main.py SEARCH_MARKETS(--market)와 같은 값. china = 자동 검색 없이 링크만 (trade_hub 안에서 처리)
+# /api/buysearch 허용 값 = buyagent main.py SEARCH_MARKETS(--market)와 같은 값.
+# aliexpress(알리 제휴 API·영어 검색)는 서버에 남겨 두지만 화면 메뉴에서는 뺌 — 알리 키를 받으면 다시 넣을지 정함 (buyagent 요청 2026-11-20)
 BUY_MARKETS = {"rakuten": "라쿠텐(일본·일본어로 검색)", "aliexpress": "알리익스프레스(중국·영어로 검색)",
                "ebay": "이베이(미국·영어로 검색)"}
-SITE_OPTIONS = [*BUY_MARKETS.items(), ("china", "타오바오·1688(중국어 · 링크만)")]
+# 사이트 메뉴: 라쿠텐 / 이베이 / 중국. china = 자동 검색 없이 중국어 검색 링크만 (타오바오·1688·알리, 화면 JS buyLinks)
+SITE_OPTIONS = [("rakuten", BUY_MARKETS["rakuten"]), ("ebay", BUY_MARKETS["ebay"]),
+                ("china", "중국(타오바오·1688·알리 · 중국어 · 링크만)")]
 SITE_LANG = {"rakuten": "ja", "aliexpress": "en", "ebay": "en", "china": "zh"}   # 언어 버튼 ↔ 사이트 맞춤 (화면 JS)
 SITE_SHORT = {"rakuten": "라쿠텐", "aliexpress": "알리익스프레스", "ebay": "이베이"}
 
@@ -352,8 +355,8 @@ def _search_section(data):
                f'<button type="submit">🔎 검색</button></form>'
                '<div class="buylinks small"></div>'
                '<p class="small muted"><b>사이트</b>를 고르고 검색하면 한글 검색어는 그 사이트 언어로 자동 번역됩니다 '
-               '(라쿠텐 30초~1분 · 알리·이베이는 buyagent에 API 키 필요). 언어 버튼은 번역 결과를 미리 보고 고치는 용도입니다 (1원 미만). '
-               '<b>타오바오·1688</b>은 자동 검색이 없어 중국어로 바꾼 검색 링크만 보여 줍니다. '
+               '(라쿠텐 30초~1분 · 이베이는 buyagent에 API 키 필요). 언어 버튼은 번역 결과를 미리 보고 고치는 용도입니다 (1원 미만). '
+               '<b>중국</b>은 자동 검색 없이 중국어로 바꾼 검색 링크(타오바오·1688·알리)만 보여 줍니다. '
                '<b>카테고리</b>는 꼭 맞게 고르세요 — 배송비·최소 마진이 달라 권장가가 크게 바뀝니다. '
                '모델명(예: SBTQ041)을 넣으면 그 단어가 들어간 상품만 남깁니다. 감시 목록·가격 이력·알림에는 영향 없습니다.</p>')
     else:
