@@ -739,14 +739,36 @@ def compliance_verdict(c):
             + f'<div class="small muted">{e(c["checked_on"])}{" · LLM 분류" if c["used_llm"] else ""}{report}</div>')
 
 
+def _ps_brief(conn, ps_id):
+    return conn.execute("""SELECT ps.id, s.company, ps.status, ps.supplier_specs_json FROM product_suppliers ps
+                           JOIN suppliers s ON s.id = ps.supplier_id WHERE ps.id = ?""", (ps_id,)).fetchone()
+
+
 def basis_supplier(conn, product_id):
-    """3번이 판정에 쓰는 대표 공급처 한 줄 (compliance_agent와 같은 순서): selected > is_top_pick > score, rejected 제외.
+    """3번이 판정에 쓰는 지금 대표 공급처 줄 (db.BASIS_PS_SQL: 선정 > 추천 > 점수, 제외 빼고).
     5번 공급처 답(supplier_specs_json)은 답장 온 공급처 줄에 적히므로, 대표가 아닌 공급처의 답은 판정에 안 들어감."""
-    return conn.execute("""SELECT s.company, ps.status, ps.supplier_specs_json FROM product_suppliers ps
-                           JOIN suppliers s ON s.id = ps.supplier_id
-                           WHERE ps.product_id = ? AND ps.status != 'rejected'
-                           ORDER BY ps.status = 'selected' DESC, ps.is_top_pick DESC, ps.score IS NULL, ps.score DESC, ps.id
-                           LIMIT 1""", (product_id,)).fetchone()
+    ps_id = db.basis_ps_id(conn, product_id)
+    return _ps_brief(conn, ps_id) if ps_id else None
+
+
+def _ps_label(bs):
+    return (f'{e(bs["company"])}{" (선정)" if bs["status"] == "selected" else ""}'
+            f'{" (제외됨)" if bs["status"] == "rejected" else ""}{" · 공급처 답 있음" if bs["supplier_specs_json"] else ""}')
+
+
+def basis_line(conn, product_id, c):
+    """판정 칸 아래 '판정 기준 공급처'. v16부터 판정 때 쓴 공급처가 기록됨 — 지금 대표와 다르면 경고."""
+    if not c:
+        return ""
+    now = basis_supplier(conn, product_id)
+    used = _ps_brief(conn, c["basis_ps_id"]) if c["basis_ps_id"] else None
+    if used and (not now or used["id"] != now["id"]):
+        cur = f'지금 기준: {_ps_label(now)}' if now else "지금 기준 공급처 없음"
+        return (f'<div class="small muted">판정 기준 공급처: {_ps_label(used)}</div>'
+                f'<div class="small warn">⚠ 공급처가 바뀜 — {cur} · 다시 점검 필요</div>')
+    if used or now:
+        return f'<div class="small muted">판정 기준 공급처: {_ps_label(used or now)}</div>'
+    return ""
 
 
 def broker_request(conn):
@@ -783,10 +805,8 @@ def compliance_rows(conn):
         hs_cell = (e(r["hs_code"]) + ' <span class="small muted">확정</span>' if r["hs_code"]
                    else (e(", ".join(hs[:3])) + ' <span class="small muted">후보</span>' if hs
                          else '<span class="muted">미확인</span>'))
-        bs = basis_supplier(conn, r["id"])
-        basis = (f'<div class="small muted">판정 기준 공급처: {e(bs["company"])}{" (선정)" if bs["status"] == "selected" else ""}'
-                 f'{" · 공급처 답 있음" if bs["supplier_specs_json"] else ""}</div>' if bs and c else "")
-        out.append([f'#{r["id"]} {e(r["name"])}', e(STAGE_LABEL.get(r["stage"], r["stage"])), compliance_verdict(c) + basis,
+        out.append([f'#{r["id"]} {e(r["name"])}', e(STAGE_LABEL.get(r["stage"], r["stage"])),
+                    compliance_verdict(c) + basis_line(conn, r["id"], c),
                     clip(" · ".join(certs), 80) if certs else ('<span class="muted">없음</span>' if c else "–"),
                     hs_cell, "–" if r["duty_rate"] is None else f'{r["duty_rate"] * 100:g}%', clip(r["fta_note"], 40),
                     clip(r["regulations"], 70)]

@@ -329,4 +329,13 @@ def test_compliance_page_broker_request_and_basis_supplier(conn, tmp_path):
         db.merge_supplier_specs(conn, sel, {"wireless": False}, [{"claim": "무선 없음", "message_id": 3}])
     html = dashboard.render(conn)
     assert "broker_request.html" in html and "보낼 수 있음 <b>1</b>개" in html        # 키캡은 공급처 질문이 남음
-    assert "판정 기준 공급처: Picked Co (선정) · 공급처 답 있음" in html
+    # 판정 때 기록된 공급처(Top Co)와 지금 대표(Picked Co)가 다름 → 경고
+    assert "판정 기준 공급처: Top Co</div>" in html
+    assert "⚠ 공급처가 바뀜 — 지금 기준: Picked Co (선정) · 공급처 답 있음 · 다시 점검 필요" in html
+    with conn:                                                                      # 다시 점검 → 경고 사라짐
+        db.save_compliance_check(conn, a, None, "go", "2026-11-21", supplier_questions=[])
+    html = dashboard.render(conn)
+    assert "판정 기준 공급처: Picked Co (선정) · 공급처 답 있음" in html and "공급처가 바뀜" not in html
+    with conn:                                                                      # 기록 없는 예전 판정: 지금 대표 표시
+        conn.execute("UPDATE compliance_checks SET basis_ps_id = NULL")
+    assert "판정 기준 공급처: Picked Co (선정)" in dashboard.render(conn)

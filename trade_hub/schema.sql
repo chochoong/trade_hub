@@ -381,6 +381,8 @@ CREATE TABLE IF NOT EXISTS compliance_checks (
     warnings_json          TEXT CHECK (warnings_json IS NULL OR json_valid(warnings_json)),                  -- 규칙 표 경고 (미검증·재확인 필요)
     supplier_questions_json TEXT CHECK (supplier_questions_json IS NULL OR json_valid(supplier_questions_json)),  -- 5번이 공급처에게 물을 사양 질문 [v14]
                                                   --   [{"flag": "chemical_product", "question_ko": "..."}] — '모름'으로 남은 사실 항목만 (정책 항목 제외)
+    basis_ps_id            INTEGER REFERENCES product_suppliers(id) ON DELETE SET NULL,  -- 판정에 쓴 대표 공급처 줄 [v16]
+                                                  --   (db.BASIS_PS_SQL 순서: 선정 > 추천 > 점수) — 지금 대표와 다르면 다시 점검 대상
     used_llm               INTEGER NOT NULL DEFAULT 0 CHECK (used_llm IN (0, 1)),                             -- LLM 분류로 플래그·HS 후보를 채웠는가
     report_path            TEXT,                  -- 사람이 읽는 보고서(.md) 경로
     checked_on             TEXT NOT NULL,         -- 판정 기준일 (YYYY-MM-DD)

@@ -26,7 +26,7 @@ from pathlib import Path
 
 PKG_DIR = Path(__file__).resolve().parent
 SCHEMA_PATH = PKG_DIR / "schema.sql"
-SCHEMA_VERSION = 15  # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
+SCHEMA_VERSION = 16  # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
 # 버전별로 추가된 컬럼: 예전 DB에는 connect() 때 ALTER TABLE로 붙인다 (새 DB는 schema.sql에 이미 있음)
 
 
@@ -59,6 +59,8 @@ MIGRATIONS = {
     14: [("compliance_checks", "supplier_questions_json", "TEXT"),   # 3번 → 5번: 공급처에게 물을 사양 질문
          ("product_suppliers", "supplier_specs_json", "TEXT")],      # 5번 → 3번: 공급처가 답한 사양 (merge_supplier_specs)
     15: [("messages", "followup_due_on", "TEXT")],   # 캘린더에서 옮긴 후속 메일 예정일 (calendar_sync가 씀, 5번 FOLLOWUP_DUE_SQL이 따름)
+    16: [("compliance_checks", "basis_ps_id",        # 3번 판정에 쓴 대표 공급처 줄 (공급처 선정이 바뀌면 다시 점검)
+          "INTEGER REFERENCES product_suppliers(id) ON DELETE SET NULL")],
 }
 PS_UNIQUE_INDEX = ("CREATE UNIQUE INDEX IF NOT EXISTS ux_ps_product_supplier_mode "
                    "ON product_suppliers(product_id, supplier_id, COALESCE(purchase_mode, ''))")
@@ -333,10 +335,32 @@ COMPLIANCE_LIST_FIELDS = ("verdict_reasons", "hs_candidates", "required_certs", 
                           "supplier_questions")   # v14: [{"flag", "question_ko"}] — 5번이 공급처에게 물음
 
 
+# 3번이 판정에 쓰는 대표 공급처 줄: 선정 > 추천(top pick) > 점수 > id, 제외(rejected) 빼고.
+# compliance_agent/compliance_agent/hub.py의 대표 공급처 쿼리와 같은 순서 — 바꾸면 같이 바꿀 것.
+# {pid}: 품목 id 식 (예: "?" 또는 "p.id"). 별칭 bp는 바깥 쿼리의 ps와 겹치지 않게.
+BASIS_PS_SQL = ("(SELECT bp.id FROM product_suppliers bp WHERE bp.product_id = {pid} AND bp.status != 'rejected' "
+                "ORDER BY bp.status = 'selected' DESC, bp.is_top_pick DESC, bp.score DESC, bp.id LIMIT 1)")
+# 최신 판정의 대표 공급처가 지금 대표와 다른 품목 (p 별칭 기준) — 판정 다시 할 것.
+# 3번 PENDING_SQL·supervisor.json compliance.when_sql이 이 조건을 포함 — 바꾸면 같이 바꿀 것.
+BASIS_CHANGED_SQL = ("EXISTS (SELECT 1 FROM compliance_checks bc WHERE bc.id = (SELECT MAX(id) FROM compliance_checks "
+                     "WHERE product_id = p.id) AND bc.basis_ps_id IS NOT NULL AND bc.basis_ps_id IS NOT "
+                     + BASIS_PS_SQL.format(pid="p.id") + ")")
+
+
+def basis_ps_id(conn, product_id):
+    """품목의 지금 대표 공급처 줄 id (없으면 None)."""
+    row = conn.execute("SELECT " + BASIS_PS_SQL.format(pid="?"), (product_id,)).fetchone()
+    return row[0]
+
+
+_AUTO = object()
+
+
 def save_compliance_check(conn, product_id, run_id, verdict, checked_on, flags=None, used_llm=False,
-                          report_path=None, **lists):
+                          report_path=None, basis_ps_id=_AUTO, **lists):
     """통관·규제 판정 1건을 남긴다 (실행마다 새 행 → 이력 유지). 새 행 id를 돌려준다.
     verdict: go / conditional / hold (한국어 '진행'·'조건부 진행'·'보류'도 받음)
+    basis_ps_id: 판정에 쓴 대표 공급처 줄 [v16]. 안 주면 저장 시점의 대표(BASIS_PS_SQL)를 적는다.
     lists: COMPLIANCE_LIST_FIELDS의 이름 (verdict_reasons=[...], hs_candidates=[...] ...) → *_json 칸에 저장"""
     verdict = {v: k for k, v in COMPLIANCE_VERDICTS.items()}.get(verdict, verdict)
     if verdict not in COMPLIANCE_VERDICTS:
@@ -346,7 +370,13 @@ def save_compliance_check(conn, product_id, run_id, verdict, checked_on, flags=N
         raise ValueError(f"알 수 없는 통관·규제 필드: {unknown}")
     if conn.execute("SELECT 1 FROM products WHERE id = ?", (product_id,)).fetchone() is None:
         raise ValueError(f"품목 번호 {product_id}가 없습니다")
+    if basis_ps_id is _AUTO:
+        basis_ps_id = globals()["basis_ps_id"](conn, product_id)
+    elif basis_ps_id is not None and conn.execute("SELECT 1 FROM product_suppliers WHERE id = ? AND product_id = ?",
+                                                  (basis_ps_id, product_id)).fetchone() is None:
+        raise ValueError(f"공급처 줄 {basis_ps_id}는 품목 {product_id}의 것이 아닙니다")
     cols = {"product_id": product_id, "run_id": run_id, "verdict": verdict, "checked_on": str(checked_on),
+            "basis_ps_id": basis_ps_id,
             "flags_json": dumps(flags), "used_llm": int(bool(used_llm)), "report_path": report_path,
             **{f"{k}_json": dumps(v) for k, v in lists.items()}}
     return conn.execute(f"INSERT INTO compliance_checks ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",

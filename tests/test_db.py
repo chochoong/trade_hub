@@ -513,3 +513,29 @@ def test_supervisor_compliance_when_sql_rechecks_after_supplier_answer(conn):
     with conn:
         db.merge_supplier_specs(conn, ps, {"chemical_product": False}, [{"claim": "접착제 없음", "message_id": 1}])
     assert count() == 1                                                          # 판정 뒤 공급처 답 → 다시 판정
+
+
+def test_compliance_basis_supplier_recorded_and_change_detected(conn):
+    pending = f"SELECT p.id FROM products p WHERE {db.BASIS_CHANGED_SQL}"
+    with conn:
+        pid = db.upsert_product(conn, "벽선반", stage="sourcing")
+        other = db.upsert_product(conn, "키캡", stage="sourcing")
+        top = db.link_supplier(conn, pid, db.upsert_supplier(conn, "Top", "China"), is_top_pick=1, score=50)
+        hi = db.link_supplier(conn, pid, db.upsert_supplier(conn, "High", "China"), score=90)
+        foreign = db.link_supplier(conn, other, db.upsert_supplier(conn, "Else", "China"))
+        assert db.basis_ps_id(conn, pid) == top and db.basis_ps_id(conn, 999) is None
+        cid = db.save_compliance_check(conn, pid, None, "go", "2026-11-20")       # 안 주면 저장 시점의 대표
+        assert conn.execute("SELECT basis_ps_id FROM compliance_checks WHERE id = ?", (cid,)).fetchone()[0] == top
+        db.save_compliance_check(conn, other, None, "go", "2026-11-20", basis_ps_id=None)
+    assert conn.execute(pending).fetchall() == []
+    with conn:
+        conn.execute("UPDATE product_suppliers SET status = 'selected' WHERE id = ?", (hi,))
+    assert [r[0] for r in conn.execute(pending)] == [pid]                         # 선정이 바뀜 → 다시 점검 대상
+    with conn:
+        db.save_compliance_check(conn, pid, None, "go", "2026-11-21", basis_ps_id=hi)
+    assert conn.execute(pending).fetchall() == []
+    with conn:
+        conn.execute("UPDATE product_suppliers SET status = 'rejected' WHERE product_id = ?", (pid,))
+    assert [r[0] for r in conn.execute(pending)] == [pid]                         # 대표가 모두 제외됨
+    with pytest.raises(ValueError):
+        db.save_compliance_check(conn, pid, None, "go", "2026-11-21", basis_ps_id=foreign)
