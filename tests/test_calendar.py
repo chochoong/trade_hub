@@ -103,10 +103,10 @@ def test_sync_adds_then_keeps_then_updates(conn):
     pid, a, b, quiet = _seed(conn)
     cal = FakeCalendar()
     quiet_log = lambda *_: None
-    assert cs.sync(conn, cal, log=quiet_log, today=TODAY) == {"add": 6, "update": 0, "delete": 0, "keep": 0}
+    assert cs.sync(conn, cal, log=quiet_log, today=TODAY) == {"add": 6, "update": 0, "delete": 0, "keep": 0, "pulled": 0}
     assert len(cal.calendars_made) == 1 and cal.calendars_made[0]["summary"] == cs.CALENDAR_NAME
     assert all(e["transparency"] == "transparent" and "date" in e["start"] for e in cal.store.values())
-    assert cs.sync(conn, cal, log=quiet_log, today=TODAY) == {"add": 0, "update": 0, "delete": 0, "keep": 6}
+    assert cs.sync(conn, cal, log=quiet_log, today=TODAY) == {"add": 0, "update": 0, "delete": 0, "keep": 6, "pulled": 0}
     assert len(cal.calendars_made) == 1                          # 캘린더는 한 번만 만듦
 
     cal.store["mine"] = {"summary": "치과 예약", "start": {"date": "2026-11-20"}}   # 사람이 직접 넣은 일정
@@ -115,7 +115,7 @@ def test_sync_adds_then_keeps_then_updates(conn):
                      "VALUES (?, 'inbound', '답', 'received', '2026-11-18T08:00:00')", (a,))
         conn.execute("UPDATE tasks SET due_date = '2026-11-26' WHERE title = '선금 송금'")
     r = cs.sync(conn, cal, log=quiet_log, today=TODAY)
-    assert r == {"add": 1, "update": 1, "delete": 1, "keep": 4}   # 6개 = 받은 답장 추가 1 + 기한 수정 1 + 그대로 4
+    assert r == {"add": 1, "update": 1, "delete": 1, "keep": 4, "pulled": 0}   # 6개 = 받은 답장 추가 1 + 기한 수정 1 + 그대로 4
     assert "치과 예약" in cal.titles()                            # trade_hub 키가 없는 일정은 건드리지 않음
     assert not any(t.startswith("⏰") for t in cal.titles())
 
@@ -151,3 +151,70 @@ def test_supervisor_skips_calendar_when_not_logged_in(conn, tmp_path, monkeypatc
     monkeypatch.setattr(cs, "sync", lambda *a, **k: (_ for _ in ()).throw(OSError("네트워크")))
     msgs = []
     assert sv.sync_calendar(conn, {}, log=msgs.append) is None and "캘린더 동기화 실패" in msgs[0]   # 실패해도 tick은 계속
+
+
+def _event(cal, key):
+    return next(e for e in cal.store.values() if (e.get("extendedProperties") or {}).get("private", {}).get(cs.KEY) == key)
+
+
+def _move(ev, day):                                                 # 사람이 캘린더에서 날짜를 끌어 옮김
+    ev["start"] = {"date": day}
+    ev["end"] = {"date": date.fromordinal(date.fromisoformat(day).toordinal() + 1).isoformat()}
+
+
+def test_moved_task_and_followup_go_to_db(conn):
+    pid, a, b, quiet = _seed(conn)
+    cal = FakeCalendar()
+    quiet_log = lambda *_: None
+    cs.sync(conn, cal, log=quiet_log, today=TODAY)
+    task_id = conn.execute("SELECT id FROM tasks WHERE title = '선금 송금'").fetchone()[0]
+    _move(_event(cal, f"task:{task_id}"), "2026-11-27")
+    _move(_event(cal, f"followup:{quiet}"), "2026-11-22")
+    _move(_event(cal, "quote:1"), "2026-12-24")                     # 기록 날짜(견적 만료)는 되돌림
+    lines = []
+    r = cs.sync(conn, cal, dry_run=True, log=lines.append, today=TODAY)  # 미리보기: DB 그대로
+    assert r["pulled"] == 2 and any("할 일 #" in x and "2026-11-25 → 2026-11-27" in x for x in lines)
+    assert conn.execute("SELECT due_date FROM tasks WHERE id = ?", (task_id,)).fetchone()[0] == "2026-11-25"
+    r = cs.sync(conn, cal, log=quiet_log, today=TODAY)
+    assert r["pulled"] == 2 and r["update"] == 3      # 견적 만료 되돌림 + 옮긴 두 일정에 새 기준 날짜 기록
+    assert conn.execute("SELECT due_date FROM tasks WHERE id = ?", (task_id,)).fetchone()[0] == "2026-11-27"
+    assert conn.execute("SELECT followup_due_on FROM messages WHERE id = ?", (quiet,)).fetchone()[0] == "2026-11-22"
+    assert _event(cal, "quote:1")["start"]["date"] == "2026-12-01"
+    assert _event(cal, f"task:{task_id}")["extendedProperties"]["private"]["day"] == "2026-11-27"
+    f = _event(cal, f"followup:{quiet}")
+    assert f["start"]["date"] == "2026-11-22" and "캘린더에서 옮긴 날짜" in f["description"]
+    assert cs.sync(conn, cal, log=quiet_log, today=TODAY)["pulled"] == 0     # 다시 돌려도 그대로
+
+
+def test_db_wins_when_both_changed_and_old_override_expires(conn):
+    pid, a, b, quiet = _seed(conn)
+    cal = FakeCalendar()
+    quiet_log = lambda *_: None
+    cs.sync(conn, cal, log=quiet_log, today=TODAY)
+    task_id = conn.execute("SELECT id FROM tasks WHERE title = '선금 송금'").fetchone()[0]
+    _move(_event(cal, f"task:{task_id}"), "2026-11-27")
+    with conn:
+        conn.execute("UPDATE tasks SET due_date = '2026-11-30' WHERE id = ?", (task_id,))
+    assert cs.sync(conn, cal, log=quiet_log, today=TODAY)["pulled"] == 0
+    assert conn.execute("SELECT due_date FROM tasks WHERE id = ?", (task_id,)).fetchone()[0] == "2026-11-30"
+    assert _event(cal, f"task:{task_id}")["start"]["date"] == "2026-11-30"
+    with conn:                                                       # 옮긴 날 이후 후속 메일을 보냈으면 다시 '보낸 지 3일'
+        conn.execute("UPDATE messages SET followup_due_on = '2026-11-19' WHERE id = ?", (quiet,))
+        conn.execute("INSERT INTO messages (product_supplier_id, direction, kind, body, status, sent_at, reply_to_id) "
+                     "VALUES (?, 'outbound', 'follow_up', '후속', 'sent', '2026-11-20T09:00:00', ?)", (a, quiet))
+    assert cs.desired_events(conn, TODAY)[f"followup:{quiet}"]["day"] == date(2026, 11, 23)
+
+
+def test_supervisor_followup_condition_follows_moved_date(conn):
+    import json
+    sql = json.loads((db.PKG_DIR.parent / "supervisor.json").read_text(encoding="utf-8"))["agents"]["negotiation"]["when_sql"]
+    pid, a, b, quiet = _seed(conn)                                   # Quiet Co: 2026-11-14 보냄, 답 없음 (지금은 3일 넘음)
+    with conn:                                                       # 받은 답장은 분석 끝난 걸로 (후속 조건만 보려고)
+        conn.execute("UPDATE messages SET analysis_json = '{}' WHERE direction = 'inbound'")
+    assert conn.execute(sql).fetchone()[0] == 1
+    with conn:
+        conn.execute("UPDATE messages SET followup_due_on = '2099-01-01' WHERE id = ?", (quiet,))   # 캘린더에서 뒤로 미룸
+    assert conn.execute(sql).fetchone()[0] == 0
+    with conn:
+        conn.execute("UPDATE messages SET followup_due_on = '2026-11-15' WHERE id = ?", (quiet,))   # 이미 지난 날짜
+    assert conn.execute(sql).fetchone()[0] == 1

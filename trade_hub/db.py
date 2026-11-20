@@ -26,7 +26,7 @@ from pathlib import Path
 
 PKG_DIR = Path(__file__).resolve().parent
 SCHEMA_PATH = PKG_DIR / "schema.sql"
-SCHEMA_VERSION = 14  # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
+SCHEMA_VERSION = 15  # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
 # 버전별로 추가된 컬럼: 예전 DB에는 connect() 때 ALTER TABLE로 붙인다 (새 DB는 schema.sql에 이미 있음)
 
 
@@ -58,6 +58,7 @@ MIGRATIONS = {
     13: [("product_suppliers", "specs_json", "TEXT")],   # 2번이 판매 페이지에서 읽은 제품 사양 → 3번 통관·규제가 읽음
     14: [("compliance_checks", "supplier_questions_json", "TEXT"),   # 3번 → 5번: 공급처에게 물을 사양 질문
          ("product_suppliers", "supplier_specs_json", "TEXT")],      # 5번 → 3번: 공급처가 답한 사양 (merge_supplier_specs)
+    15: [("messages", "followup_due_on", "TEXT")],   # 캘린더에서 옮긴 후속 메일 예정일 (calendar_sync가 씀, 5번 FOLLOWUP_DUE_SQL이 따름)
 }
 PS_UNIQUE_INDEX = ("CREATE UNIQUE INDEX IF NOT EXISTS ux_ps_product_supplier_mode "
                    "ON product_suppliers(product_id, supplier_id, COALESCE(purchase_mode, ''))")

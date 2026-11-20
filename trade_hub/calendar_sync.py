@@ -6,7 +6,11 @@
 
 원칙
   · 권한은 calendar.app.created 하나 — 이 앱이 만든 '무역' 캘린더만 만들고 고칠 수 있다. 개인 일정은 읽지도 못한다.
-  · DB → 캘린더 한 방향. 캘린더에서 고친 내용은 다음 동기화 때 DB 값으로 돌아간다.
+  · 기본은 DB → 캘린더. 캘린더에서 고친 내용은 다음 동기화 때 DB 값으로 돌아간다.
+  · 예외 (캘린더 → DB): 사람이 정하는 날짜 두 가지는 캘린더에서 날짜를 옮기면 DB에 반영한다.
+      📌 할 일 기한 → tasks.due_date   ⏰ 후속 메일 예정일 → messages.followup_due_on (5번이 그 날부터 후속 초안)
+    일정마다 마지막으로 쓴 날짜(private.day)를 달아 두고, 캘린더 날짜가 그와 다르면 '사람이 옮김'으로 본다.
+    같은 사이에 DB 날짜도 바뀌었으면 DB가 이긴다. 메일·견적·선적 날짜(기록)는 옮겨도 되돌린다.
   · 참석자를 넣지 않는다 (구글이 초대 메일을 보내지 않게). 모두 종일 일정 + '한가함'(다른 일정과 겹쳐도 바쁨 표시 안 함).
   · 일정마다 DB 키(extendedProperties.private.trade_hub_key)를 달고, 그 키가 있는 일정만 고치거나 지운다.
 
@@ -39,6 +43,7 @@ PAST_DAYS = 180                 # 이보다 오래된 지난 일정(보낸·받�
 FOLLOWUP_DAYS, MAX_FOLLOWUPS = 3, 2   # negotiation_agent/hub.py 의 FOLLOWUP_DAYS·MAX_FOLLOWUPS와 같게 — 바꾸면 같이
 KEY = "trade_hub_key"
 COLORS = {"sent": "2", "received": "7", "followup": "6", "task": "11", "quote": "5", "shipment": "9"}
+PULL_KINDS = ("task", "followup")   # 캘린더에서 날짜를 옮기면 DB에 반영하는 일정 종류
 KIND_LABEL = {"rfq": "RFQ", "follow_up": "후속 메일", "negotiation": "협상", "sample": "샘플", "order": "발주", "other": "메일"}
 
 
@@ -148,7 +153,7 @@ def desired_events(conn, today=None):
 
     # 후속 메일 예정일: negotiation_agent FOLLOWUP_DUE_SQL에서 '3일 지남' 조건만 빼고, 예정일을 계산
     for r in conn.execute("""
-        SELECT m.id, m.subject, m.sent_at, s.company, p.id AS product_id, p.name AS product,
+        SELECT m.id, m.subject, m.sent_at, m.followup_due_on, s.company, p.id AS product_id, p.name AS product,
                (SELECT MAX(f.sent_at) FROM messages f WHERE f.reply_to_id = m.id AND f.kind = 'follow_up'
                   AND f.status = 'sent') AS last_followup,
                (SELECT COUNT(*) FROM messages f WHERE f.reply_to_id = m.id AND f.kind = 'follow_up'
@@ -167,16 +172,23 @@ def desired_events(conn, today=None):
             continue
         base = _day(r["last_followup"] or r["sent_at"])
         n = r["followups"] + 1
-        add(_ev(f"followup:{r['id']}", "followup", base + timedelta(days=FOLLOWUP_DAYS) if base else None,
+        moved = _day(r["followup_due_on"])
+        if moved and (not r["last_followup"] or moved > _day(r["last_followup"])):
+            due, why = moved, "캘린더에서 옮긴 날짜 — 이 날부터 5번이 후속 메일 초안을 만듭니다 (보내는 건 직접)."
+        else:
+            due = base + timedelta(days=FOLLOWUP_DAYS) if base else None
+            why = f"{FOLLOWUP_DAYS}일째 답이 없으면 5번이 후속 메일 초안을 만듭니다 (보내는 건 직접)."
+        add(_ev(f"followup:{r['id']}", "followup", due,
                 f"⏰ 후속 메일 예정 ({n}/{MAX_FOLLOWUPS}) · {r['company']}",
-                [_who(r), f"{FOLLOWUP_DAYS}일째 답이 없으면 5번이 후속 메일 초안을 만듭니다 (보내는 건 직접).",
+                [_who(r), why, "날짜를 옮기면 다음 동기화 때 DB에 반영됩니다.",
                  f"원래 메일 #{r['id']}" + (f" — {r['subject']}" if r["subject"] else "")], r["product_id"]))
 
     for r in conn.execute("""SELECT t.*, p.name AS product FROM tasks t LEFT JOIN products p ON p.id = t.product_id
                              WHERE t.status = 'pending' AND t.due_date IS NOT NULL"""):
         add(_ev(f"task:{r['id']}", "task", _day(r["due_date"]), f"📌 할 일 기한 · {r['title']}",
                 [f"#{r['product_id']} {r['product']}" if r["product_id"] else "", r["detail"] or "",
-                 f"할 일 #{r['id']} — 처리: trade_hub done {r['id']}"], r["product_id"]))
+                 f"할 일 #{r['id']} — 처리: trade_hub done {r['id']}", "날짜를 옮기면 다음 동기화 때 DB 기한에 반영됩니다."],
+                r["product_id"]))
 
     for r in conn.execute("""
         SELECT q.*, s.company, p.id AS product_id, p.name AS product
@@ -204,7 +216,7 @@ def event_body(ev):
     return {"summary": ev["title"], "description": ev["description"],
             "start": {"date": ev["day"].isoformat()}, "end": {"date": (ev["day"] + timedelta(days=1)).isoformat()},
             "transparency": "transparent", "colorId": COLORS.get(ev["kind"]),
-            "extendedProperties": {"private": {KEY: ev["key"], "fp": fp}}}
+            "extendedProperties": {"private": {KEY: ev["key"], "fp": fp, "day": ev["day"].isoformat()}}}
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +243,8 @@ def ensure_calendar(svc, create=True):
     if not create:
         return None
     cal = svc.calendars().insert(body={"summary": CALENDAR_NAME, "timeZone": TIMEZONE,
-                                       "description": "trade_hub 공용 DB의 날짜를 옮겨 온 캘린더 (자동 동기화 — 여기서 고친 내용은 덮어써짐)"}
+                                       "description": "trade_hub 공용 DB의 날짜를 옮겨 온 캘린더 (자동 동기화). "
+                                                      "📌 할 일 기한·⏰ 후속 메일 예정일은 날짜를 옮기면 DB에 반영, 나머지는 고쳐도 DB 값으로 돌아감"}
                                  ).execute()
     p = state_path()
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -241,7 +254,8 @@ def ensure_calendar(svc, create=True):
 
 
 def _existing(svc, cal_id):
-    """캘린더에 있는 trade_hub 일정 {키: (일정 id, fp)} — 키가 없는(사람이 직접 만든) 일정은 건드리지 않음."""
+    """캘린더에 있는 trade_hub 일정 {키: (일정 id, fp, 마지막으로 쓴 날짜, 지금 캘린더 날짜)}
+    — 키가 없는(사람이 직접 만든) 일정은 건드리지 않음."""
     out, token = {}, None
     while True:
         page = svc.events().list(calendarId=cal_id, maxResults=2500, pageToken=token, showDeleted=False,
@@ -249,15 +263,46 @@ def _existing(svc, cal_id):
         for ev in page.get("items") or []:
             priv = (ev.get("extendedProperties") or {}).get("private") or {}
             if priv.get(KEY):
-                out[priv[KEY]] = (ev["id"], priv.get("fp"))
+                out[priv[KEY]] = (ev["id"], priv.get("fp"), priv.get("day"), (ev.get("start") or {}).get("date"))
         token = page.get("nextPageToken")
         if not token:
             return out
 
 
+def pull_moved(conn, have, want, dry_run=False, log=print):
+    """캘린더에서 사람이 옮긴 📌 할 일 기한·⏰ 후속 메일 예정일 → DB. 반영한 키 목록을 돌려준다.
+    조건: 캘린더 날짜 ≠ 마지막으로 쓴 날짜(사람이 옮김) 이고, DB 날짜 = 마지막으로 쓴 날짜(DB는 그대로).
+    DB도 바뀌었으면 DB가 이김(반영 안 함). 완료된 할 일·끝난 후속 메일(want에 없음)은 무시."""
+    moved = []
+    for k, (_, _, wrote, now_day) in have.items():
+        kind, _, ref = k.partition(":")
+        if kind not in PULL_KINDS or k not in want or not wrote or not now_day or now_day == wrote:
+            continue
+        if want[k][0]["day"].isoformat() != wrote:
+            continue                                   # DB 날짜도 바뀜 → DB가 이김
+        try:
+            new_day, ref_id = date.fromisoformat(now_day), int(ref)
+        except ValueError:
+            continue
+        label = f"할 일 #{ref_id} 기한" if kind == "task" else f"메일 #{ref_id} 후속 예정일"
+        log(f"  {'(미리보기) ' if dry_run else ''}캘린더에서 옮김 → DB: {label} {wrote} → {new_day.isoformat()}")
+        moved.append(k)
+        if dry_run:
+            continue
+        with conn:
+            if kind == "task":
+                conn.execute("UPDATE tasks SET due_date = ? WHERE id = ? AND status = 'pending'",
+                             (new_day.isoformat(), ref_id))
+            else:
+                conn.execute("UPDATE messages SET followup_due_on = ? WHERE id = ?", (new_day.isoformat(), ref_id))
+    return moved
+
+
 def sync(conn, svc=None, dry_run=False, log=print, today=None):
-    """DB 날짜를 캘린더에 반영. 반환: {'add': n, 'update': n, 'delete': n, 'keep': n}."""
+    """캘린더에서 옮긴 할 일 기한·후속 예정일을 DB에 먼저 반영하고, DB 날짜를 캘린더에 반영.
+    반환: {'add': n, 'update': n, 'delete': n, 'keep': n, 'pulled': n}."""
     want = {k: (ev, event_body(ev)) for k, ev in desired_events(conn, today).items()}
+    moved = []
     if svc is None and dry_run and not configured():   # 로그인 전 미리보기: DB에서 만들 일정만 보여 줌
         log("  (구글 로그인 전 — DB에서 만들 일정만 표시합니다. 로그인: trade_hub calendar-login)")
         cal_id, have = None, {}
@@ -265,8 +310,15 @@ def sync(conn, svc=None, dry_run=False, log=print, today=None):
         svc = svc or service()
         cal_id = ensure_calendar(svc, create=not dry_run)
         have = _existing(svc, cal_id) if cal_id else {}
+        moved = pull_moved(conn, have, want, dry_run, log)
+        if moved and not dry_run:                      # DB가 바뀌었으니 다시 계산 (옮긴 날짜가 새 기준)
+            want = {k: (ev, event_body(ev)) for k, ev in desired_events(conn, today).items()}
+    skip = set(moved) if dry_run else set()           # 미리보기: 옮긴 일정을 되돌리는 '수정'으로 보이지 않게
     plan = {"add": [k for k in want if k not in have],
-            "update": [k for k in want if k in have and have[k][1] != want[k][1]["extendedProperties"]["private"]["fp"]],
+            "update": [k for k in want if k in have and k not in skip
+                       and (have[k][1] != want[k][1]["extendedProperties"]["private"]["fp"]
+                            or have[k][2] != want[k][1]["extendedProperties"]["private"]["day"]
+                            or have[k][3] != want[k][1]["start"]["date"])],
             "delete": [k for k in have if k not in want]}
     keep = len(want) - len(plan["add"]) - len(plan["update"])
     for what, keys in plan.items():
@@ -282,7 +334,9 @@ def sync(conn, svc=None, dry_run=False, log=print, today=None):
                 svc.events().update(calendarId=cal_id, eventId=have[k][0], body=want[k][1]).execute()
             else:
                 svc.events().delete(calendarId=cal_id, eventId=have[k][0]).execute()
-    result = {"add": len(plan["add"]), "update": len(plan["update"]), "delete": len(plan["delete"]), "keep": keep}
+    result = {"add": len(plan["add"]), "update": len(plan["update"]), "delete": len(plan["delete"]), "keep": keep,
+              "pulled": len(moved)}
     log(f"  캘린더 '{CALENDAR_NAME}': 추가 {result['add']} · 수정 {result['update']} · 삭제 {result['delete']} · 그대로 {keep}"
+        + (f" · 캘린더→DB {len(moved)}" if moved else "")
         + (" (미리보기 — 바뀐 것 없음)" if dry_run else ""))
     return result

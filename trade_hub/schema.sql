@@ -207,6 +207,8 @@ CREATE TABLE IF NOT EXISTS messages (
     external_id          TEXT,                -- 메일 서비스의 메시지 id (Gmail: 보낸/받은 메일). 같은 메일 중복 저장 방지  [v9]
     external_thread_id   TEXT,                -- 메일 서비스의 대화(스레드) id — 답장을 어느 공급처 줄에 붙일지 판단  [v9]
     external_draft_id    TEXT,                -- 메일 서비스 임시보관함에 넣은 초안 id (발송은 사람이 직접)  [v9]
+    followup_due_on      TEXT,                -- 보낸 메일(원래 메일): 사람이 캘린더에서 옮긴 다음 후속 메일 예정일 (YYYY-MM-DD)  [v15]
+                                              --   마지막 후속 메일을 보낸 날보다 뒤일 때만 유효, 아니면 기본(보낸 지 3일)
     created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime')),
     sent_at              TEXT,                -- 발송/수신 시각
     CHECK ((direction = 'inbound') = (status = 'received'))
