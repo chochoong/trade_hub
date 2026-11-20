@@ -739,6 +739,39 @@ def compliance_verdict(c):
             + f'<div class="small muted">{e(c["checked_on"])}{" · LLM 분류" if c["used_llm"] else ""}{report}</div>')
 
 
+def basis_supplier(conn, product_id):
+    """3번이 판정에 쓰는 대표 공급처 한 줄 (compliance_agent와 같은 순서): selected > is_top_pick > score, rejected 제외.
+    5번 공급처 답(supplier_specs_json)은 답장 온 공급처 줄에 적히므로, 대표가 아닌 공급처의 답은 판정에 안 들어감."""
+    return conn.execute("""SELECT s.company, ps.status, ps.supplier_specs_json FROM product_suppliers ps
+                           JOIN suppliers s ON s.id = ps.supplier_id
+                           WHERE ps.product_id = ? AND ps.status != 'rejected'
+                           ORDER BY ps.status = 'selected' DESC, ps.is_top_pick DESC, ps.score IS NULL, ps.score DESC, ps.id
+                           LIMIT 1""", (product_id,)).fetchone()
+
+
+def broker_request(conn):
+    """3번 관세사 문의서 (compliance_agent/output/hub/broker_request.html — 최신 판정 보고서와 같은 폴더)와
+    '보낼 수 있음' 품목 수 (최신 판정의 공급처 질문이 비어 있음). 파일이 없으면 (None, n)."""
+    path = None
+    for (rp,) in conn.execute("SELECT report_path FROM compliance_checks WHERE report_path IS NOT NULL ORDER BY id DESC LIMIT 1"):
+        cand = Path(rp).with_name("broker_request.html")
+        path = cand if cand.is_file() else None
+    n = conn.execute("""SELECT COUNT(*) FROM products p JOIN compliance_checks c
+                          ON c.id = (SELECT MAX(id) FROM compliance_checks WHERE product_id = p.id)
+                        WHERE p.stage NOT IN ('candidate', 'dropped', 'closed')
+                          AND json_valid(c.supplier_questions_json) AND json_array_length(c.supplier_questions_json) = 0""").fetchone()[0]
+    return path, n
+
+
+def broker_line(conn):
+    path, n = broker_request(conn)
+    if not path:
+        return ""
+    return (f'<p class="small">📨 <a href="{e(file_href(path))}" target="_blank" rel="noopener">관세사 문의서</a>'
+            f' · 보낼 수 있음 <b>{n}</b>개 <span class="muted">(공급처에게 더 물을 사양이 없는 품목 — 3번 점검이 끝날 때마다 새로 만듦, '
+            '보내기는 직접)</span></p>')
+
+
 def compliance_rows(conn):
     rows = conn.execute(f"""SELECT * FROM products WHERE stage NOT IN ('candidate', 'dropped')
                             ORDER BY {db.stage_order_sql()} DESC, id""").fetchall()
@@ -750,7 +783,10 @@ def compliance_rows(conn):
         hs_cell = (e(r["hs_code"]) + ' <span class="small muted">확정</span>' if r["hs_code"]
                    else (e(", ".join(hs[:3])) + ' <span class="small muted">후보</span>' if hs
                          else '<span class="muted">미확인</span>'))
-        out.append([f'#{r["id"]} {e(r["name"])}', e(STAGE_LABEL.get(r["stage"], r["stage"])), compliance_verdict(c),
+        bs = basis_supplier(conn, r["id"])
+        basis = (f'<div class="small muted">판정 기준 공급처: {e(bs["company"])}{" (선정)" if bs["status"] == "selected" else ""}'
+                 f'{" · 공급처 답 있음" if bs["supplier_specs_json"] else ""}</div>' if bs and c else "")
+        out.append([f'#{r["id"]} {e(r["name"])}', e(STAGE_LABEL.get(r["stage"], r["stage"])), compliance_verdict(c) + basis,
                     clip(" · ".join(certs), 80) if certs else ('<span class="muted">없음</span>' if c else "–"),
                     hs_cell, "–" if r["duty_rate"] is None else f'{r["duty_rate"] * 100:g}%', clip(r["fta_note"], 40),
                     clip(r["regulations"], 70)]
@@ -1098,7 +1134,7 @@ def agent_body(conn, agent):
         return [section("서류 할 일", tasks_of(conn, ["document"]))]
     if agent == "compliance":
         return [(compliance_run_bar() if SERVER["on"] else "")
-                + section("진행 품목의 HS 코드·관세·인증", compliance_rows(conn))]
+                + section("진행 품목의 HS 코드·관세·인증", broker_line(conn) + compliance_rows(conn))]
     if agent == "costing":
         return [section("공급처별 원가·마진", costing_rows(conn))]
     if agent == "sales":

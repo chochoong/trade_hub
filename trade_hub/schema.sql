@@ -4,7 +4,7 @@
 -- 에이전트 (agent_runs.agent 값)
 --  discover    1. 시장조사·아이템 발굴      → products(candidate), product_scores
 --  sourcing    2. 공급처 발굴              → suppliers, product_suppliers
---  compliance  3. 통관·규제 체크            → compliance_checks(supplier_questions 포함), tasks(decision: 보류 판정)
+--  compliance  3. 통관·규제 체크            → compliance_checks(supplier_questions 포함), tasks(decision: 보류 판정·관세사 문의 준비)
 --                                          (products.hs_code·duty_rate·fta_note는 관세사 확인 후 사람이 입력 — 에이전트는 후보만)
 --  costing     4. 원가·수익 계산            → product_suppliers.est_landed_krw·est_margin_pct
 --  negotiation 5. 커뮤니케이션·협상         → messages(초안), quotes, product_suppliers.supplier_specs_json

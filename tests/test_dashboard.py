@@ -303,3 +303,30 @@ def test_source_page_link_shown(conn):
                           source_page_url="https://detail.1688.com/offer/123.html")
     html = dashboard.render(conn)
     assert 'href="https://detail.1688.com/offer/123.html" target="_blank" rel="noopener noreferrer">해외 판매 페이지</a>' in html
+
+
+def test_compliance_page_broker_request_and_basis_supplier(conn, tmp_path):
+    hub = tmp_path / "output" / "hub"
+    hub.mkdir(parents=True)
+    (hub / "hub_1_report.md").write_text("#", encoding="utf-8")
+    with conn:
+        a = db.upsert_product(conn, "벽선반", stage="sourcing")
+        b = db.upsert_product(conn, "키캡", stage="negotiating")
+        top = db.link_supplier(conn, a, db.upsert_supplier(conn, "Top Co", "China"), is_top_pick=1, score=60)
+        sel = db.link_supplier(conn, a, db.upsert_supplier(conn, "Picked Co", "China"), score=50)
+        db.link_supplier(conn, a, db.upsert_supplier(conn, "Gone Co", "China"), score=99)
+        conn.execute("UPDATE product_suppliers SET status = 'rejected' WHERE score = 99")
+        db.save_compliance_check(conn, a, None, "go", "2026-11-20", report_path=str(hub / "hub_1_report.md"),
+                                 supplier_questions=[])
+        db.save_compliance_check(conn, b, None, "hold", "2026-11-20",
+                                 supplier_questions=[{"flag": "wireless", "question_ko": "무선?"}])
+    html = dashboard.render(conn)
+    assert "관세사 문의서" not in html                                              # 파일이 없으면 링크 없음
+    assert "판정 기준 공급처: Top Co" in html and "Gone Co" not in html.split("판정 기준 공급처")[1][:40]
+    (hub / "broker_request.html").write_text("<p>문의서</p>", encoding="utf-8")
+    with conn:
+        conn.execute("UPDATE product_suppliers SET status = 'selected' WHERE id = ?", (sel,))
+        db.merge_supplier_specs(conn, sel, {"wireless": False}, [{"claim": "무선 없음", "message_id": 3}])
+    html = dashboard.render(conn)
+    assert "broker_request.html" in html and "보낼 수 있음 <b>1</b>개" in html        # 키캡은 공급처 질문이 남음
+    assert "판정 기준 공급처: Picked Co (선정) · 공급처 답 있음" in html
