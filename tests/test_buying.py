@@ -310,3 +310,45 @@ def test_china_option_links_only_no_api_search():
         assert site in js
     assert [k for k, _ in buying.SITE_OPTIONS] == ["rakuten", "ebay", "china"]
     assert "aliexpress" in buying.BUY_MARKETS                    # 서버 허용 값에는 남김 (화면에서만 안 부름)
+
+
+@pytest.mark.skipif(not REAL_WEB.is_file(), reason="buyagent web.py 없음")
+def test_naver_low_link_value_and_save_use_real_buyagent(ba):
+    _copy_buyagent_code(ba)
+    (ba / "reports").mkdir(exist_ok=True)
+    (ba / "reports" / "latest.json").write_text(json.dumps({"ok": True, "run_at": "2026-11-20T10:00:00", "markets": ["coupang", "naver"],
+        "items": [{"id": "ai-glasses", "name": "AI안경", "status": "ok", "quotes": [{"market": "naver", "recommended_price": 171600, "margin": 1}]},
+                  {"id": "watch", "name": "세이코 시계", "status": "ok", "quotes": []},
+                  {"id": "gone", "name": "목록에 없는 상품 (괄호)", "status": "ok", "quotes": []}]}), encoding="utf-8")
+    _search_json(ba)
+    sj = json.loads((ba / "reports" / "search.json").read_text(encoding="utf-8"))
+    sj.update(markets=["coupang", "naver"], items=[{"name": "SEIKO SBTQ041", "status": "ok", "best_offer": {"price": 1, "currency": "USD"},
+                                                    "quotes": [{"market": "naver", "recommended_price": 50000, "margin": 1}]}])
+    (ba / "reports" / "search.json").write_text(json.dumps(sj, ensure_ascii=False), encoding="utf-8")
+    code, out = buying.watch_call("naver_low", ba, id="ai-glasses", price="165,000", memo="스토어A 배송비 포함")
+    assert code == 200 and out["saved"]["price"] == "165000", out
+    assert buying.watch_call("naver_low", ba, id="없음", price="1", memo="")[0] == 404
+    assert "숫자" in buying.watch_call("naver_low", ba, id="watch", price="abc", memo="")[1]["error"]
+    dashboard.SERVER["on"] = True
+    try:
+        html = buying.page()
+    finally:
+        dashboard.SERVER["on"] = False
+    secs = {x.split("<", 1)[0]: x for x in html.split("<h2>")[1:]}   # 섹션 제목 → 내용
+    latest = secs["최근 실행 결과"]
+    assert 'href="https://search.shopping.naver.com/search/all?query=AI%EC%95%88%EA%B2%BD%20%3C%EC%8A%A4%EB%A7%88%ED%8A%B8%3E"' in latest
+    assert 'rel="noopener noreferrer">네이버 최저가 보기 ↗' in latest
+    assert 'title="메모: 스토어A 배송비 포함">네이버 최저가 165,000원 · ' in latest and "권장가가 4% 높음" in latest
+    assert "네이버 최저가 미입력" in latest and latest.count("최저가 적기") == 2      # 목록에 없는 'gone'은 링크만
+    assert 'data-buywatch="naverlow" data-id="ai-glasses" data-price="165000"' in latest
+    search = secs["직접 검색"]
+    assert "query=SBTQ041\"" in search and "네이버 최저가 보기" in search and "최저가 적기" not in search
+    old = (ba / "catalog" / "naver_prices.csv").read_text(encoding="utf-8-sig").replace(date.today().isoformat(), "2026-01-01")
+    (ba / "catalog" / "naver_prices.csv").write_text(old, encoding="utf-8-sig")
+    assert "다시 확인 필요 (" in buying.page()
+    assert buying.watch_call("naver_low", ba, id="ai-glasses", price="", memo="")[0] == 200     # 빈 값 = 지우기
+    assert "165,000원" not in buying.page()
+
+
+def test_naver_low_absent_in_old_buyagent(ba):
+    assert buying.load()["naver_low"] is None and "네이버 최저가" not in buying.page()

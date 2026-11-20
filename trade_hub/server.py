@@ -492,8 +492,8 @@ def buy_watch(conn, body):
     쓰기는 buyagent web.py 의 add_watch·toggle_watch 그대로 (열 순서·id 규칙·중복 거절이 buyagent와 같음)."""
     action = str(body.get("action") or "")
     base = buying.buyagent_dir()
-    if action not in ("add", "toggle", "pause", "schedule"):
-        return 400, {"error": "action은 add·toggle·pause·schedule 중 하나"}
+    if action not in ("add", "toggle", "pause", "schedule", "naver_low"):
+        return 400, {"error": "action은 add·toggle·pause·schedule·naver_low 중 하나"}
     if not (Path(base) / "web.py").is_file():
         return 400, {"error": f"buyagent web.py가 없습니다: {Path(base) / 'web.py'} (buyagent를 최신으로)"}
     if action in ("pause", "schedule"):              # 감시 전체 멈춤·매시간 자동 실행 (buyagent pause_request·schedule_request)
@@ -505,6 +505,11 @@ def buy_watch(conn, body):
             return buying.watch_call(action, base, **{key: body[key]})
         finally:
             buying.forget_status()
+    if action == "naver_low":                         # [최저가 적기] → buyagent web.naver_low_request (catalog/naver_prices.csv)
+        pid, price, memo = (str(body.get(k) or "").strip() for k in ("id", "price", "memo"))
+        if not pid or len(pid) > 100 or len(price) > 20 or len(memo) > 500:
+            return 400, {"error": "상품 ID·최저가·메모 형식이 이상합니다."}
+        return buying.watch_call("naver_low", base, id=pid, price=price, memo=memo)
     with LOCK:
         if any(j["kind"] == "buysearch" and j["status"] == "running" for j in JOBS.values()):
             return 409, {"error": "직접 검색이 실행 중입니다. 끝난 뒤 다시 눌러 주세요."}

@@ -7,6 +7,7 @@
   reports/latest.json        최근 실행 결과 (buyagent가 실행마다 덮어씀, 형식은 buyagent 요청문의 schema 1)
   reports/search.json        직접 검색 결과 (python main.py --search "검색어" --category 카테고리)
   history.db                 가격 이력
+  catalog/naver_prices.csv   사람이 네이버 쇼핑에서 보고 적은 최저가 (buyagent core/naver_low.py — 자동 수집 없음)
 
 폴더 위치: 환경변수 BUYAGENT_DIR, 없으면 trade_hub 옆의 ../buyagent/buyagent
 """
@@ -56,13 +57,21 @@ def load(base=None):
     base = Path(base or buyagent_dir())
     out = {"dir": base, "exists": (base / "catalog").is_dir(), "products": [], "prices": [], "latest": None,
            "latest_error": None, "search": None, "search_error": None, "history": [], "history_count": 0,
-           "paused_since": None, "ship_warnings": []}
+           "paused_since": None, "ship_warnings": [], "naver_low": None, "naver_lows": {}, "naver_days": 30}
     if not out["exists"]:
         return out
     out["paused_since"] = paused_since(base)
     out["ship_warnings"] = ship_rate_warnings(base)
     out["products"] = _csv(base / "catalog" / "products.csv")
     out["prices"] = _csv(base / "catalog" / "manual_prices.csv")
+    nl = naver_low_module(base)
+    if nl:
+        out["naver_low"] = nl
+        try:
+            out["naver_lows"] = nl.load(base)
+        except (OSError, ValueError):
+            out["naver_lows"] = {}
+        out["naver_days"] = nl.max_days(_settings(base))
     latest = base / "reports" / "latest.json"
     if latest.exists():
         try:
@@ -106,6 +115,8 @@ elif a["action"] == "pause":        # 감시 전체 멈춤/다시 시작 → cor
     r = web.pause_request({"paused": a["paused"]}, base)
 elif a["action"] == "schedule":     # 매시간 자동 실행 등록/해제 (작업 스케줄러)
     r = web.schedule_request({"on": a["on"]}, base)
+elif a["action"] == "naver_low":   # [최저가 적기] → catalog/naver_prices.csv (빈 값 = 지우기)
+    r = web.naver_low_request({"id": a["id"], "price": a["price"], "memo": a.get("memo") or ""}, base)
 elif a["action"] == "status":
     r = (200, {"paused_since": web.paused_since(base), "schedule": web.schedule_status()})
 else:
@@ -279,6 +290,83 @@ def nav_item(data=None):
             f'<span class="metric">{active if data["exists"] else "–"}<small> 감시</small></span></a>')
 
 
+_NAVER_LOW = {}   # {파일 경로: (수정 시각, 모듈)}
+
+
+def naver_low_module(base=None):
+    """buyagent core/naver_low.py (표준 라이브러리만 씀)를 파일 경로로 불러온다 — 검색 링크·검색어·상태 계산을
+    buyagent와 똑같이. buyagent의 core 패키지 전체는 불러오지 않음. 파일이 없으면 None."""
+    import importlib.util
+    f = Path(base or buyagent_dir()) / "core" / "naver_low.py"
+    try:
+        mtime = f.stat().st_mtime
+    except OSError:
+        return None
+    hit = _NAVER_LOW.get(str(f))
+    if hit and hit[0] == mtime:
+        return hit[1]
+    spec = importlib.util.spec_from_file_location("_buyagent_naver_low", f)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _NAVER_LOW[str(f)] = (mtime, mod)
+    return mod
+
+
+def _settings(base):
+    """buyagent config/settings.toml + settings.local.toml의 [naver_low]만 (local이 덮어씀, 키 값은 읽어도 쓰지 않음)."""
+    out = {}
+    for name in ("settings.toml", "settings.local.toml"):
+        f = Path(base) / "config" / name
+        try:
+            out.update(tomllib.loads(f.read_text(encoding="utf-8")).get("naver_low") or {})
+        except (OSError, ValueError):
+            pass
+    return {"naver_low": out}
+
+
+def naver_cell(data, kw, st, rec, pid=""):
+    """스마트스토어 권장가 아래: [네이버 최저가 보기 ↗] + 사람이 적은 최저가 + [최저가 적기] (buyagent web.naver_cell과 같은 표시).
+    링크는 사람이 눌러 보는 용도 — 서버가 네이버 페이지를 열거나 읽지 않음 (크롤링 없음)."""
+    from trade_hub.dashboard import SERVER, e
+    nl = data.get("naver_low")
+    if not nl:
+        return ""
+    out = (f'<div class="small"><a href="{e(nl.search_url(kw))}" target="_blank" rel="noopener noreferrer">'
+           '네이버 최저가 보기 ↗</a></div>' if kw else "")
+    if st:
+        cmp = ""
+        if isinstance(rec, (int, float)) and st["price"]:
+            d = (rec - st["price"]) / st["price"]
+            cmp = (f' · <span class="warn">권장가가 {d:.0%} 높음</span>' if d > 0.005 else
+                   f' · <span class="ok">권장가가 {-d:.0%} 낮음</span>' if d < -0.005 else " · 권장가와 같음")
+        when = (f'<span class="moq unk">다시 확인 필요 ({st["days"]}일 전)</span>' if st["stale"]
+                else f'{e(st["checked"][5:])} 확인')
+        tip = f' title="메모: {e(st["memo"])}"' if st["memo"] else ""
+        out += f'<div class="small"{tip}>네이버 최저가 {st["price"]:,}원 · {when}{cmp}</div>'
+    elif pid:
+        out += '<div class="small muted">네이버 최저가 미입력</div>'
+    if pid and SERVER["on"]:
+        out += (f'<button type="button" class="btn" data-buywatch="naverlow" data-id="{e(pid)}" '
+                f'data-price="{e(st["price"] if st else "")}" data-memo="{e(st["memo"] if st else "")}">최저가 적기</button>')
+    return out
+
+
+def _watch_naver(data, it):
+    """최근 감시 결과 한 줄 → (네이버 검색어, 적은 값 상태, 상품 ID). buyagent render().watch_naver와 같음."""
+    nl = data.get("naver_low")
+    iid = str(it.get("id") or "")
+    p = next((r for r in data["products"] if (r.get("id") or "").strip() == iid), None)
+    pid = iid if p else ""
+    kw = nl.link_keyword(p) if p else str(it.get("name") or "")
+    return kw, nl.status(data["naver_lows"].get(pid), data["naver_days"]), pid
+
+
+def _search_naver_kw(q):
+    """직접 검색 → 네이버 검색어: 꼭 들어갈 단어 첫 번째, 없으면 원래(한글) 검색어, 없으면 검색어."""
+    must = [w for w in suggest_must(q).split("|") if w]
+    return must[0] if must else (q.get("keyword_original") or q.get("keyword") or "")
+
+
 def _latest_section(data):
     from trade_hub.dashboard import clip, e, num, section, table, web_link
     latest = data["latest"]
@@ -303,6 +391,9 @@ def _latest_section(data):
         cells = [f'{q.get("recommended_price"):,}원<div class="small muted">마진 {q.get("margin"):,}원</div>'
                  if (q := quotes.get(m)) and isinstance(q.get("recommended_price"), (int, float))
                  and isinstance(q.get("margin"), (int, float)) else '<span class="muted">–</span>' for m in markets]
+        if data.get("naver_low") and "naver" in markets:
+            kw, st, pid = _watch_naver(data, it)
+            cells[markets.index("naver")] += naver_cell(data, kw, st, (quotes.get("naver") or {}).get("recommended_price"), pid)
         notes = (it.get("warnings") or []) + (it.get("events") or [])
         rows.append([_product_link(it.get("name") or it.get("id"), it.get("hub_product_id")),
                      f'<span class="{cls}">{e(label)}</span>' + (f'<div class="small">{clip(why, 50)}</div>' if why else ""),
@@ -369,6 +460,7 @@ def _search_section(data):
         return section("직접 검색", how + '<p class="empty">아직 직접 검색한 결과가 없습니다.</p>')
     q = s.get("query") or {}
     markets = s.get("markets") or []
+    naver_kw = _search_naver_kw(q)
     rows = []
     for i, it in enumerate(s.get("items") or [], 1):
         if it.get("status") == "blocked":
@@ -383,6 +475,8 @@ def _search_section(data):
         cells = [f'{x.get("recommended_price"):,}원<div class="small muted">마진 {x.get("margin"):,}원</div>'
                  if (x := quotes.get(m)) and isinstance(x.get("recommended_price"), (int, float))
                  and isinstance(x.get("margin"), (int, float)) else '<span class="muted">–</span>' for m in markets]
+        if data.get("naver_low") and "naver" in markets:      # 직접 검색은 감시 상품이 아니라 링크만 (적은 값·버튼 없음)
+            cells[markets.index("naver")] += naver_cell(data, naver_kw, None, None)
         rows.append([str(i), f'{shop}<div class="small">{clip(it.get("name"), 70)}</div>',
                      f'{num(o.get("price"), "{:,.0f}" if o.get("currency") in ("JPY", "KRW") else "{:,.2f}")} '
                      f'{e(o.get("currency"))} {ship}',

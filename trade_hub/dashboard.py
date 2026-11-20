@@ -1379,6 +1379,12 @@ document.addEventListener("click", function (ev) {   // 구매대행 감시 목�
     if (!confirm(stop ? "감시를 전체 멈출까요? 정기 실행이 와도 조회·디스코드 알림을 하지 않아요. 상품별 켜짐/꺼짐은 그대로예요."
                       : "감시를 다시 시작할까요? 다음 정기 실행부터 켜진 상품을 조회하고 알림을 보내요.")) return;
     body = {action: "pause", paused: stop};
+  } else if (kind === "naverlow") {   // 네이버 최저가: 사람이 [네이버 최저가 보기]로 확인한 값 → buyagent catalog/naver_prices.csv
+    var price = prompt("네이버 쇼핑에서 직접 본 최저가 (원, 숫자만)\\n[네이버 최저가 보기]로 확인한 값을 적어요. 비우면 지워요.", b.dataset.price || "");
+    if (price === null) return;
+    var memo = price.trim() ? prompt("메모 (판매처, 배송비 포함 여부 등 · 비워도 됨)", b.dataset.memo || "") : "";
+    if (memo === null) return;
+    body = {action: "naver_low", id: b.dataset.id, price: price.trim(), memo: memo};
   } else if (kind === "schedule") {
     var on = b.dataset.on === "1";
     if (!confirm(on ? "Windows 작업 스케줄러에 buyagent를 매시간 실행으로 등록할까요? 정기 감시·디스코드 알림을 buyagent가 보냅니다."

@@ -482,3 +482,16 @@ def test_stop_job(srv, conn, monkeypatch, tmp_path):
 def test_job_panel_has_stop_button():
     from trade_hub import dashboard
     assert 'data-stop="' in dashboard.SERVER_JS and '"/api/stop"' in dashboard.SERVER_JS
+
+def test_buy_watch_naver_low(srv, monkeypatch, tmp_path):
+    from trade_hub import buying as b
+    (tmp_path / "web.py").write_text("", encoding="utf-8")
+    monkeypatch.setenv("BUYAGENT_DIR", str(tmp_path))
+    seen = []
+    monkeypatch.setattr(b, "watch_call", lambda action, base_=None, **kw: (seen.append((action, kw)), (200, {"id": kw["id"]}))[1])
+    assert call(srv + "/api/buywatch", {"action": "naver_low", "id": "w1", "price": "165,000", "memo": " 스토어A "}) == (200, {"id": "w1"})
+    assert call(srv + "/api/buywatch", {"action": "naver_low", "id": "w1", "price": ""})[0] == 200          # 빈 값 = 지우기
+    assert call(srv + "/api/buywatch", {"action": "naver_low", "price": "1"})[0] == 400                     # ID 없음
+    assert call(srv + "/api/buywatch", {"action": "naver_low", "id": "w1", "price": "1" * 21})[0] == 400
+    assert seen == [("naver_low", {"id": "w1", "price": "165,000", "memo": "스토어A"}),
+                    ("naver_low", {"id": "w1", "price": "", "memo": ""})]
