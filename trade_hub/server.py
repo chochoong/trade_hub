@@ -22,6 +22,7 @@ trade_hub serve — 내 PC에서만 열리는 대시보드 서버 (http://127.0.
       커스텀 헤더 X-Trade-Hub: 1 이 있어야 받는다(다른 사이트에서 몰래 보내는 요청 차단).
 """
 
+import itertools
 import json
 import mimetypes
 import os
@@ -47,6 +48,7 @@ REF_TTL = 3600                                          # 참고 이미지 다�
 
 JOBS = {}                                               # 작업 id → dict (메모리, 서버를 끄면 사라짐)
 LOCK = threading.Lock()
+JOB_SEQ = itertools.count(1)                            # 작업 번호 (next()는 스레드에서 같이 불러도 안 겹침)
 RENDER_LOCK = threading.Lock()                          # dashboard 모듈 상태(SERVER·_REFS)를 한 번에 하나만
 _REF_STATE = {"at": 0.0, "need": None}
 
@@ -151,6 +153,36 @@ def busy_reason(conn, agent):
     return None
 
 
+MAX_PARALLEL_SOURCING = 3   # 2번 공급처 찾기 동시 실행 수 (품목·구매 방식이 다르면 같이 돌림. LLM 비용·메모리 때문에 상한)
+
+
+def sourcing_busy_reason(conn, pid, mode):
+    """2번 공급처 찾기를 지금 시작하면 안 되는 이유, 괜찮으면 None.
+    품목이 다르거나 구매 방식이 다르면 같이 돌린다 (DB 기록은 품목·공급처·구매 방식별로 따로 쌓임).
+    같은 품목·같은 방식이 실행 중이거나, 동시 실행 상한이거나, 다른 곳(슈퍼바이저)이 '남은 품목 전부'를
+    조사 중이면 (같은 품목을 겹쳐 조사할 수 있어) 막는다."""
+    with LOCK:
+        running = [j for j in JOBS.values() if j["agent"] == "sourcing" and j["status"] == "running"]
+    if any(j.get("key") == (pid, mode) for j in running):
+        return "이 품목을 같은 구매 방식으로 이미 찾는 중입니다. 끝난 뒤 다시 눌러 주세요."
+    if len(running) >= MAX_PARALLEL_SOURCING:
+        return f"공급처 찾기는 동시에 {MAX_PARALLEL_SOURCING}개까지 돌립니다. 하나가 끝난 뒤 다시 눌러 주세요."
+    _, _, timeout = agent_spec("sourcing")
+    since = (datetime.now() - timedelta(minutes=timeout)).strftime("%Y-%m-%dT%H:%M:%S")
+    for row in conn.execute("SELECT id, args_json FROM agent_runs WHERE agent = 'sourcing' AND status = 'running' "
+                            "AND started_at >= ?", (since,)):
+        try:
+            args = json.loads(row["args_json"] or "{}") or {}
+        except ValueError:
+            args = {}
+        ids = args.get("ids") or []
+        if not ids:
+            return f"다른 곳(슈퍼바이저 등)에서 남은 품목 전부를 조사하느라 실행 중입니다 (실행 #{row['id']}). 끝난 뒤 다시 눌러 주세요."
+        if pid in ids and args.get("sourcing_type", "small_batch") == mode:
+            return f"다른 곳에서 이 품목을 같은 구매 방식으로 찾느라 실행 중입니다 (실행 #{row['id']}). 끝난 뒤 다시 눌러 주세요."
+    return None
+
+
 def _kill(proc):
     if proc.poll() is not None:
         return
@@ -189,16 +221,16 @@ def windows_user_env(name):
         return None
 
 
-def start_job(kind, arg, label, product_id=None, anchor=None):
+def start_job(kind, arg, label, product_id=None, anchor=None, key=None):
     cmd, cwd, timeout = job_command(kind, arg)
     if not Path(cwd).is_dir():
         raise RuntimeError(f"에이전트 폴더가 없습니다: {cwd} (supervisor.json의 cwd 확인)")
-    job_id = f"{datetime.now():%H%M%S}-{len(JOBS) + 1}"
+    job_id = f"{datetime.now():%H%M%S}-{next(JOB_SEQ)}"   # 동시에 여러 작업을 시작해도 번호·로그 파일이 겹치지 않게
     logs = db.default_path().parent / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     job = {"id": job_id, "kind": kind, "agent": KIND_AGENT[kind], "label": label, "status": "running",
            "product_id": product_id, "anchor": anchor, "lines": [], "started": time.time(), "ended": None, "exit_code": None,
-           "log": str(logs / f"{datetime.now():%Y%m%d_%H%M%S}_serve_{kind}.log")}
+           "key": key, "log": str(logs / f"{datetime.now():%Y%m%d_%H%M%S}_serve_{kind}_{job_id}.log")}
     env = {**os.environ, "TRADE_DB": str(db.default_path().resolve()), "PYTHONIOENCODING": "utf-8",
            "PYTHONUNBUFFERED": "1"}   # 진행 줄을 바로바로 넘김 (없으면 파이프라 끝날 때 한꺼번에 와서 알림창이 내내 빈 칸)
     if kind == "buysearch" and not env.get("ANTHROPIC_API_KEY"):   # buyagent 한글 검색어 번역용 — 이 키 하나만 넘김
@@ -320,7 +352,7 @@ def select(conn, body):
         return 400, {"error": f"#{pid}는 이미 {dashboard.STAGE_LABEL.get(row['stage'], row['stage'])} 단계입니다."}
     if mode == "oem" and row["stage"] == "candidate":   # 대량은 구매대행·소량으로 검증한 뒤 (2번 공급처 발굴 카드에서만)
         return 400, {"error": "대량 사입·OEM은 공급처 발굴 단계 품목에서만 찾을 수 있습니다 (소량으로 먼저 검증)."}
-    reason = busy_reason(conn, "sourcing")
+    reason = sourcing_busy_reason(conn, pid, mode)
     if reason:
         return 409, {"error": reason}
     if row["stage"] == "candidate":           # 사람이 버튼으로 결정 → 단계 이동 (trade_hub select와 같음)
@@ -328,7 +360,7 @@ def select(conn, body):
             db.set_stage(conn, pid, "sourcing", note="사람이 선정 → 공급처 발굴로 (대시보드)")
     return 200, job_view(start_job("sourcing", (pid, mode, country),
                                    f"2번 {PURCHASE_MODES[mode]}용 공급처 찾기 ({COUNTRIES[country]}): #{pid} {row['name']}",
-                                   product_id=pid))
+                                   product_id=pid, key=(pid, mode)))
 
 
 def compliance(conn, body):

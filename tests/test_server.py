@@ -418,3 +418,34 @@ def test_compliance_buttons_only_in_server_mode(conn, tmp_path):
     finally:
         dashboard.SERVER["on"] = False
     assert html.count('data-act="compliance"') == 2 and 'id="compliance-official"' in html   # 전체 + 품목 1개
+
+
+def test_sourcing_runs_in_parallel(srv, conn, monkeypatch, tmp_path):
+    """품목·구매 방식이 다르면 2번을 같이 돌리고, 같은 품목·같은 방식과 상한 초과만 막는다."""
+    monkeypatch.setattr(server, "job_command",
+                        lambda kind, arg: ([sys.executable, "-c", "import time; time.sleep(8)"], tmp_path, 1))
+    with conn:
+        a, b, c, d = (db.upsert_product(conn, n) for n in ("AI안경", "키캡", "텀블러", "선반"))
+    jobs = []
+    try:
+        code, job = call(srv + "/api/select", {"product_id": a, "mode": "retail"})
+        assert code == 200
+        jobs.append(job)
+        code, out = call(srv + "/api/select", {"product_id": a, "mode": "retail"})
+        assert code == 409 and "같은 구매 방식" in out["error"]                  # 같은 품목·같은 방식
+        for pid, mode in ((a, "small_batch"), (b, "retail")):                  # 방식이 다르거나 품목이 다르면 같이
+            code, job = call(srv + "/api/select", {"product_id": pid, "mode": mode})
+            assert code == 200, job
+            jobs.append(job)
+        assert len({j["id"] for j in jobs}) == 3
+        code, out = call(srv + "/api/select", {"product_id": c})
+        assert code == 409 and "동시에 3개" in out["error"]                     # 상한
+        assert conn.execute("SELECT stage FROM products WHERE id = ?", (c,)).fetchone()[0] == "candidate"
+    finally:
+        server.JOBS.clear()   # 가짜 작업(8초 대기)은 스스로 끝남
+    with conn:   # 다른 곳(슈퍼바이저)에서 특정 품목만 조사 중이면 다른 품목은 돌림
+        conn.execute("INSERT INTO agent_runs (agent, status, args_json) VALUES "
+                     "('sourcing', 'running', ?)", (json.dumps({"ids": [d], "sourcing_type": "small_batch"}),))
+    assert server.sourcing_busy_reason(conn, b, "small_batch") is None
+    assert "같은 구매 방식" in server.sourcing_busy_reason(conn, d, "small_batch")
+    assert server.sourcing_busy_reason(conn, d, "retail") is None
