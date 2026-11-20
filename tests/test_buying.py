@@ -19,6 +19,7 @@ ai-glasses,34.5,USD,CN,3.2,N,Evil,javascript:alert(1),2026-11-01,오래된 가�
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch):
     monkeypatch.setattr(naver, "keys", lambda: None)
+    monkeypatch.setattr(buying, "AUTO_NAME_KO", False)                 # 상품명 한국어 풀이: 실제 번역 호출 안 함
 
 
 @pytest.fixture
@@ -352,3 +353,36 @@ def test_naver_low_link_value_and_save_use_real_buyagent(ba):
 
 def test_naver_low_absent_in_old_buyagent(ba):
     assert buying.load()["naver_low"] is None and "네이버 최저가" not in buying.page()
+
+
+@pytest.mark.skipif(not (REAL_WEB.parent / "core" / "name_ko.py").is_file(), reason="buyagent core/name_ko.py 없음")
+def test_name_ko_shown_and_background_fill_uses_real_buyagent(ba, monkeypatch):
+    import time
+    _copy_buyagent_code(ba)
+    (ba / "reports").mkdir(exist_ok=True)
+    (ba / "reports" / "latest.json").write_text(json.dumps({"ok": True, "markets": [], "items": [
+        {"id": "watch", "name": "セイコー 腕時計 <SBTQ041>", "status": "ok"}]}, ensure_ascii=False), encoding="utf-8")
+    _search_json(ba)
+    sj = json.loads((ba / "reports" / "search.json").read_text(encoding="utf-8"))
+    sj["items"] = [{"name": "SEIKO Watch SBTQ041", "status": "ok", "best_offer": {"price": 1, "currency": "USD"}}]
+    (ba / "reports" / "search.json").write_text(json.dumps(sj, ensure_ascii=False), encoding="utf-8")
+    (ba / "data").mkdir()
+    (ba / "data" / "name_ko.json").write_text(json.dumps({"セイコー 腕時計 <SBTQ041>": "세이코 손목시계 <SBTQ041>",
+                                                          "SEIKO Watch SBTQ041": "세이코 시계 SBTQ041"}, ensure_ascii=False), encoding="utf-8")
+    html = buying.page()
+    assert 'セイコー 腕時計 &lt;SBTQ041&gt;</a>' in html or 'セイコー 腕時計 &lt;SBTQ041&gt;' in html
+    assert '<span class="muted">(세이코 손목시계 &lt;SBTQ041&gt;)</span>' in html                 # 최근 감시 결과 (이스케이프)
+    assert '<span class="muted">(세이코 시계 SBTQ041)</span>' in html                             # 직접 검색 결과
+    assert "(AI" not in html                                                                     # 풀이 없는 이름은 괄호 없음
+    # 뒤에서 채우기: 키 없음 → 시작하지 않고 잠시 다시 안 봄 / 키 있음 → missing만 보내고 한 번 보낸 이름은 다시 안 보냄
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    buying._NAME_JOB.update(running=False, tried=set(), no_key_until=0.0, last=None)
+    assert buying.start_name_fill(ba, ["Seiko Watch"])
+    for _ in range(100):
+        if not buying._NAME_JOB["running"]:
+            break
+        time.sleep(0.1)
+    assert buying._NAME_JOB["last"] == {"ready": False} and buying._NAME_JOB["no_key_until"] > time.time()
+    assert not buying.start_name_fill(ba, ["Seiko Watch"])                                       # 키 없음 → 60초 동안 안 봄
+    buying._NAME_JOB.update(no_key_until=0.0, tried={"Seiko Watch"})
+    assert not buying.start_name_fill(ba, ["Seiko Watch"])                                       # 이미 보낸 이름

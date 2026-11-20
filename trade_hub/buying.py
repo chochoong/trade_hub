@@ -8,6 +8,7 @@
   reports/search.json        직접 검색 결과 (python main.py --search "검색어" --category 카테고리)
   history.db                 가격 이력
   catalog/naver_prices.csv   사람이 네이버 쇼핑에서 보고 적은 최저가 (buyagent core/naver_low.py — 자동 수집 없음)
+  data/name_ko.json          외국어 상품명의 한국어 풀이 (buyagent core/name_ko.py, 화면 표시용 — buyagent 화면과 같이 씀)
 
 폴더 위치: 환경변수 BUYAGENT_DIR, 없으면 trade_hub 옆의 ../buyagent/buyagent
 """
@@ -57,13 +58,21 @@ def load(base=None):
     base = Path(base or buyagent_dir())
     out = {"dir": base, "exists": (base / "catalog").is_dir(), "products": [], "prices": [], "latest": None,
            "latest_error": None, "search": None, "search_error": None, "history": [], "history_count": 0,
-           "paused_since": None, "ship_warnings": [], "naver_low": None, "naver_lows": {}, "naver_days": 30}
+           "paused_since": None, "ship_warnings": [], "naver_low": None, "naver_lows": {}, "naver_days": 30,
+           "name_ko_on": False, "name_ko": {}}
     if not out["exists"]:
         return out
     out["paused_since"] = paused_since(base)
     out["ship_warnings"] = ship_rate_warnings(base)
     out["products"] = _csv(base / "catalog" / "products.csv")
     out["prices"] = _csv(base / "catalog" / "manual_prices.csv")
+    if (base / "core" / "name_ko.py").is_file():    # 한국어 풀이: 저장된 것만 읽음 (번역은 page()에서 뒤로)
+        out["name_ko_on"] = True
+        try:
+            ko = json.loads((base / "data" / "name_ko.json").read_text(encoding="utf-8"))
+            out["name_ko"] = {k: v for k, v in ko.items() if isinstance(v, str)} if isinstance(ko, dict) else {}
+        except (OSError, ValueError):
+            pass
     nl = naver_low_module(base)
     if nl:
         out["naver_low"] = nl
@@ -367,6 +376,78 @@ def _search_naver_kw(q):
     return must[0] if must else (q.get("keyword_original") or q.get("keyword") or "")
 
 
+# 상품명 한국어 풀이 채우기: buyagent core.name_ko(ready·missing·fill)를 buyagent 폴더에서 따로 띄운 파이썬으로
+# (name_ko는 buyagent core 패키지의 translate를 씀). 키는 buyagent/.env를 name_ko가 직접 읽음 — trade_hub는 키를 안 봄.
+NAME_FILL_SCRIPT = """
+import json, sys
+from pathlib import Path
+from core import name_ko
+names = json.loads(sys.stdin.read())
+base = Path.cwd()
+if not name_ko.ready(base):
+    print("RESULT_JSON=" + json.dumps({"ready": False}))
+else:
+    todo = name_ko.missing(base, names)
+    added = name_ko.fill(base, todo) if todo else 0
+    print("RESULT_JSON=" + json.dumps({"ready": True, "todo": len(todo), "added": added}))
+"""
+AUTO_NAME_KO = True         # 화면을 그릴 때 뒤에서 번역 시작 (테스트는 끔 — 실제 LLM 호출 방지)
+NAME_FILL_TIMEOUT = 300     # 초
+NO_KEY_RETRY = 60           # 초 — 키가 없으면 이 동안 다시 확인하지 않음 (키를 넣으면 서버를 다시 켜지 않아도 시작)
+_NAME_JOB = {"running": False, "tried": set(), "no_key_until": 0.0, "last": None}
+_NAME_LOCK = __import__("threading").Lock()
+
+
+def start_name_fill(base, names):
+    """한국어 풀이가 없는 상품명을 뒤에서 번역 시작 (화면 그리기는 기다리지 않음). 시작했으면 True.
+    동시에 하나만 · 한 번 보낸 이름은 이 서버가 켜져 있는 동안 다시 보내지 않음 (실패해도 — 다시 켜면 재시도)."""
+    import subprocess
+    import sys
+    import threading
+    import time
+    base = Path(base)
+    with _NAME_LOCK:
+        todo = list(dict.fromkeys(n for n in names if n and n not in _NAME_JOB["tried"]))
+        if _NAME_JOB["running"] or not todo or time.time() < _NAME_JOB["no_key_until"]:
+            return False
+        _NAME_JOB["running"] = True
+
+    def work():
+        res = None
+        try:
+            r = subprocess.run([sys.executable, "-c", NAME_FILL_SCRIPT], cwd=base, input=json.dumps(todo),
+                               capture_output=True, text=True, encoding="utf-8", errors="replace",
+                               timeout=NAME_FILL_TIMEOUT, env={**os.environ, "PYTHONIOENCODING": "utf-8"})
+            res = next((json.loads(x.split("=", 1)[1]) for x in reversed(r.stdout.splitlines())
+                        if x.startswith("RESULT_JSON=")), None)
+        except Exception:
+            res = None
+        finally:
+            with _NAME_LOCK:
+                _NAME_JOB["running"] = False
+                _NAME_JOB["last"] = res
+                if res and res.get("ready") is False:
+                    _NAME_JOB["no_key_until"] = time.time() + NO_KEY_RETRY
+                else:
+                    _NAME_JOB["tried"].update(todo)   # 번역됐거나·번역 대상 아님·실패 → 다시 안 보냄
+    threading.Thread(target=work, daemon=True).start()
+    return True
+
+
+def ko_tag(data, name):
+    """외국어 상품명 옆 (한국어 풀이) — 저장된 풀이가 있을 때만."""
+    from trade_hub.dashboard import e
+    k = (data.get("name_ko") or {}).get(name or "")
+    return f' <span class="muted">({e(k)})</span>' if k else ""
+
+
+def _all_names(data):
+    names = [it.get("name") for it in ((data.get("latest") or {}).get("items") or [])]
+    names += [it.get("name") for it in ((data.get("search") or {}).get("items") or [])]
+    names += [p.get("name") for p in data["products"]]
+    return [n for n in names if isinstance(n, str) and n.strip()]
+
+
 def _latest_section(data):
     from trade_hub.dashboard import clip, e, num, section, table, web_link
     latest = data["latest"]
@@ -395,7 +476,7 @@ def _latest_section(data):
             kw, st, pid = _watch_naver(data, it)
             cells[markets.index("naver")] += naver_cell(data, kw, st, (quotes.get("naver") or {}).get("recommended_price"), pid)
         notes = (it.get("warnings") or []) + (it.get("events") or [])
-        rows.append([_product_link(it.get("name") or it.get("id"), it.get("hub_product_id")),
+        rows.append([_product_link(it.get("name") or it.get("id"), it.get("hub_product_id")) + ko_tag(data, it.get("name")),
                      f'<span class="{cls}">{e(label)}</span>' + (f'<div class="small">{clip(why, 50)}</div>' if why else ""),
                      price or '<span class="muted">–</span>',
                      cost_cell(it), *cells,
@@ -477,7 +558,7 @@ def _search_section(data):
                  and isinstance(x.get("margin"), (int, float)) else '<span class="muted">–</span>' for m in markets]
         if data.get("naver_low") and "naver" in markets:      # 직접 검색은 감시 상품이 아니라 링크만 (적은 값·버튼 없음)
             cells[markets.index("naver")] += naver_cell(data, naver_kw, None, None)
-        rows.append([str(i), f'{shop}<div class="small">{clip(it.get("name"), 70)}</div>',
+        rows.append([str(i), f'{shop}<div class="small">{clip(it.get("name"), 70)}{ko_tag(data, it.get("name"))}</div>',
                      f'{num(o.get("price"), "{:,.0f}" if o.get("currency") in ("JPY", "KRW") else "{:,.2f}")} '
                      f'{e(o.get("currency"))} {ship}',
                      cost_cell(it), *cells, clip(" / ".join(it.get("warnings") or []), 60)])
@@ -527,7 +608,8 @@ def _products_section(data):
         if SERVER["on"] and p.get("id"):            # buyagent web.py toggle 과 같은 동작 (active Y ↔ N)
             state += (f' <button type="button" class="btn" data-buywatch="toggle" data-id="{e(p.get("id"))}">'
                       f'{"끄기" if on else "켜기"}</button>')
-        rows.append([e(p.get("id")), _product_link(p.get("name") or p.get("id"), _hub_id(p)), e(p.get("category")),
+        rows.append([e(p.get("id")), _product_link(p.get("name") or p.get("id"), _hub_id(p)) + ko_tag(data, p.get("name")),
+                     e(p.get("category")),
                      e(p.get("sources") or "기본"), state, tag + clip(memo, 50)])
     body = table(["ID", "상품", "카테고리", "판매처 소스", "상태", "메모"], rows, "tight") if rows else '<p class="empty">없음</p>'
     return section("감시 상품", body, f'{len(rows)}개 · catalog/products.csv')
@@ -606,6 +688,9 @@ def page(data=None):
              f'<ul>{"".join(f"<li>{e(x)}</li>" for x in roles)}</ul><p class="small">{state}</p></div></section>')
     if not data["exists"]:
         return intro
+    from trade_hub.dashboard import SERVER
+    if SERVER["on"] and AUTO_NAME_KO and data.get("name_ko_on"):     # 풀이가 없는 이름은 뒤에서 번역 → 다음 새로고침부터 보임
+        start_name_fill(data["dir"], [n for n in _all_names(data) if n not in data["name_ko"]])
     notes = _watch_line(data)
     if data.get("ship_warnings"):
         notes += ('<p class="small warn">⚠ ' + " / ".join(e(w) for w in data["ship_warnings"]) +
