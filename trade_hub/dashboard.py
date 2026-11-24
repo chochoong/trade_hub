@@ -271,6 +271,19 @@ def demand_trend(nv):
     return f'<span class="small" title="{e(tip)}">{text}</span>'
 
 
+def demand_tag(conn, product_id):
+    """진행 중 품목 카드 머리의 '수요 추세' (1번 최신 점수의 쇼핑인사이트). 값이 없으면 빈 문자열."""
+    r = conn.execute("SELECT naver_json FROM product_scores WHERE product_id = ? ORDER BY id DESC LIMIT 1",
+                     (product_id,)).fetchone()
+    try:
+        nv = json.loads(r["naver_json"]) if r and r["naver_json"] else {}
+    except ValueError:
+        nv = {}
+    if not isinstance(nv, dict) or not isinstance(nv.get("shopping_insight"), dict):
+        return ""
+    return f' <span class="small trend-tag"><span class="muted">수요 추세</span> {demand_trend(nv)}</span>'
+
+
 def candidate_rows(conn):
     rows = conn.execute("""
         SELECT p.*, s.total, s.demand, s.margin, s.competition, s.regulation, s.logistics, s.est_fob_usd,
@@ -492,7 +505,7 @@ def products_in_progress(conn):
                             (p["id"],)).fetchone()
         cards.append(f"""<div class="card" id="prod-{p["id"]}">
   <div class="card-head"><span class="badge">{e(STAGE_LABEL.get(p["stage"], p["stage"]))}</span>
-    {photo(p, "big")}<div><b>#{p["id"]} {e(p["name"])}</b> <span class="muted small">{e(last["note"] if last else "")} · {e(last["at"][:16] if last else "")}</span>
+    {photo(p, "big")}<div><b>#{p["id"]} {e(p["name"])}</b>{demand_tag(conn, p["id"])} <span class="muted small">{e(last["note"] if last else "")} · {e(last["at"][:16] if last else "")}</span>
     <div class="small">{search_links(p)}</div></div>
     <span class="right">{sourcing_button(p, set(groups))}</span></div>
   {discover_summary(conn, p)}
@@ -1283,7 +1296,7 @@ def negotiation_view(conn):
             body += (f'<details class="more"><summary class="small">다른 후보 공급처 {len(rest)}곳</summary>'
                      + "".join(supplier_thread(conn, s) for s in rest) + "</details>")
         cards.append(f'<div class="card"><div class="card-head"><span class="badge">{e(STAGE_LABEL.get(p["stage"], p["stage"]))}</span>'
-                     f'{photo(p)}<div><b>#{p["id"]} {e(p["name"])}</b> <span class="muted small">{e(p["search_keyword_en"])}</span>'
+                     f'{photo(p)}<div><b>#{p["id"]} {e(p["name"])}</b>{demand_tag(conn, p["id"])} <span class="muted small">{e(p["search_keyword_en"])}</span>'
                      f'</div></div>{body}</div>')
     if SERVER["on"]:       # Gmail: 사람이 보낸 메일을 '보냄'으로, 새 답장은 가져와 분석 (슈퍼바이저도 2시간마다 함)
         cards.insert(0, '<div class="row">' + neg_form(

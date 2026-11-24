@@ -448,3 +448,18 @@ def test_demand_trend_short_text():
     assert "분야 미정" in dashboard.demand_trend({"volume_idx": 3, "shop_category": None})
     assert dashboard.demand_trend({"volume_idx": 3}) == '<span class="muted">–</span>'        # 기존 품목 (칸 없음)
     assert dashboard.demand_trend({}) == '<span class="muted">–</span>'
+
+
+def test_progress_cards_show_demand_trend(conn):
+    import json
+    si = {"category": "생활/건강", "keyword": "찜기", "months": [], "series": [], "change_3m": 24, "trend": "오름",
+          "seasonal": None}
+    with conn:
+        a = db.upsert_product(conn, "실리콘 찜기", stage="sourcing")
+        b = db.upsert_product(conn, "예전 품목", stage="negotiating")
+        conn.execute("INSERT INTO product_scores (product_id, naver_json) VALUES (?, ?)",
+                     (a, json.dumps({"volume_idx": 3, "shop_category": "생활/건강", "shopping_insight": si})))
+    assert "수요 추세" in dashboard.demand_tag(conn, a) and "오름 +24%" in dashboard.demand_tag(conn, a)
+    assert dashboard.demand_tag(conn, b) == ""                                       # 값 없으면 표시 안 함
+    html, _ = dashboard.products_in_progress(conn)
+    assert html.count("trend-tag") == 1
