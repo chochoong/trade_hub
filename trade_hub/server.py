@@ -27,6 +27,7 @@ import json
 import mimetypes
 import os
 import re
+import socket
 import subprocess
 import sys
 import threading
@@ -813,15 +814,36 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(code, out)
 
 
+class HubServer(ThreadingHTTPServer):
+    """중복 실행 방지: Windows는 기본 설정(SO_REUSEADDR)이면 같은 포트에 서버가 또 떠도 오류가 안 나고
+    요청이 예전 서버로 갈 수 있다 → 포트를 독점(SO_EXCLUSIVEADDRUSE)해서 두 번째 서버는 시작 실패하게 한다."""
+    allow_reuse_address = os.name != "nt"     # 리눅스·맥은 재시작 직후(TIME_WAIT) 바로 다시 열 수 있게 그대로
+
+    def server_bind(self):
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def make_server(port=DEFAULT_PORT, refs=True):
-    srv = ThreadingHTTPServer((HOST, port), Handler)
+    srv = HubServer((HOST, port), Handler)
     srv.daemon_threads = True
     srv.refs = refs
     return srv
 
 
 def serve(port=DEFAULT_PORT, open_browser=True, refs=True):
-    srv = make_server(port, refs)
+    try:
+        srv = make_server(port, refs)
+    except OSError as exc:                    # 포트 사용 중 = 이미 켜진 서버 (또는 다른 프로그램)
+        url = f"http://127.0.0.1:{port}/"
+        print(f"⚠ 대시보드 서버가 이미 켜져 있습니다: {url}  (포트 {port} 사용 중 · {exc.strerror or exc})")
+        print("  새로 켜지 않습니다. 코드를 바꿨으면 켜져 있는 서버 창에서 Ctrl+C로 끈 뒤 다시 실행하세요.")
+        print(f"  다른 포트로 켜려면: trade_hub serve --port {port + 1}")
+        if open_browser:
+            import webbrowser
+            webbrowser.open(url)
+        return 1
     url = f"http://127.0.0.1:{srv.server_address[1]}/"
     print(f"▶ 대시보드 서버: {url}  (이 PC에서만 접속 가능 · 끄려면 Ctrl+C)")
     print(f"  DB: {db.default_path()}")

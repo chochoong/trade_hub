@@ -507,6 +507,20 @@ def test_costneg_route_validates_and_runs(srv, conn, monkeypatch):
     assert call(srv + "/api/costneg", {"ps_id": 9999})[0] == 404
 
 
+# --- 중복 실행 방지 -----------------------------------------------------------------------
+def test_second_server_on_same_port_is_refused(capsys, monkeypatch):
+    first = server.make_server(0, refs=False)
+    port = first.server_address[1]
+    try:
+        with pytest.raises(OSError):
+            server.make_server(port, refs=False)
+        monkeypatch.setattr("webbrowser.open", lambda url: None)
+        assert server.serve(port, open_browser=True, refs=False) == 1
+        assert "이미 켜져 있습니다" in capsys.readouterr().out
+    finally:
+        first.server_close()
+
+
 def test_buy_watch_naver_low(srv, monkeypatch, tmp_path):
     from trade_hub import buying as b
     (tmp_path / "web.py").write_text("", encoding="utf-8")

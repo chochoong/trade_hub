@@ -145,7 +145,8 @@ def main(argv=None):
     elif cmd == "serve":
         from trade_hub import server
         port = int(rest[rest.index("--port") + 1]) if "--port" in rest and rest.index("--port") + 1 < len(rest) else server.DEFAULT_PORT
-        server.serve(port, open_browser="--no-open" not in rest, refs="--no-ref" not in rest)
+        if server.serve(port, open_browser="--no-open" not in rest, refs="--no-ref" not in rest) == 1:
+            sys.exit(1)             # 이미 켜져 있음 (중복 실행 방지)
     elif cmd == "photo":
         photo(conn, rest)
     elif cmd == "dashboard":
