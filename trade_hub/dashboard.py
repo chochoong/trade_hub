@@ -1255,6 +1255,8 @@ def agent_page(conn, agent, no, name, roles):
 
 
 SEARCH_JS = """
+// 새로 고침 뒤 브라우저가 예전 스크롤 위치로 되돌리지 않게 (페이지가 커서 load가 늦으면 '결과 보기' 이동을 덮어씀)
+if ("scrollRestoration" in history) history.scrollRestoration = "manual";
 var INDEX = JSON.parse(document.getElementById("prod-index").textContent);
 var box = document.getElementById("q"), list = document.getElementById("q-results");
 function norm(t) { return (t || "").toLowerCase().replace(/\\s+/g, ""); }
@@ -1337,6 +1339,7 @@ function show() {
 }
 window.addEventListener("hashchange", show);
 show();
+window.addEventListener("load", function () { if (location.hash) show(); });   // 사진 등이 다 뜬 뒤 위치가 밀렸으면 한 번 더 이동
 document.addEventListener("click", function (ev) {   // 초안 원문 복사 → 메일·알리바바 등에 붙여넣어 직접 발송
   var b = ev.target.closest("button[data-copy]");
   if (!b) return;

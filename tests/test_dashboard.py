@@ -394,3 +394,9 @@ def test_costing_page_send_button_only_in_server_mode(conn, tmp_path, monkeypatc
         _json.dumps({str(pid): {"target": 2.5, "max": 2.9, "ps_id": ps}}), encoding="utf-8")
     html = dashboard.costing_rows(conn)
     assert "✓ 5번 기준" in html and "2.9" not in html                         # 가격은 화면에 안 나옴
+
+
+def test_result_link_scroll_not_undone_after_reload():
+    js = dashboard.SEARCH_JS
+    assert js.index('history.scrollRestoration = "manual"') < js.index("show();")   # 새로 고침 뒤 예전 위치로 안 되돌림
+    assert 'window.addEventListener("load", function () { if (location.hash) show(); });' in js
