@@ -1323,7 +1323,7 @@ function show() {
     var pg = target && target.closest(".page");
     var fold = target && target.closest("details.more");
     if (fold) fold.open = true;
-    id = pg ? pg.id.slice(2) : "home";
+    id = pg ? pg.id.slice(2) : "a5";          // 5번에 그 공급처 칸이 없으면(협상 전 등) 5번 페이지로
   }
   var found = false;
   document.querySelectorAll(".page").forEach(function (p) { var on = p.id === "p-" + id; p.hidden = !on; found = found || on; });

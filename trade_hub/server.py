@@ -377,7 +377,7 @@ def research(conn, body):
     reason = busy_reason(conn, "discover")
     if reason:
         return 409, {"error": reason}
-    return 200, job_view(start_job("research", q, f"1번 조사: {q}"))
+    return 200, job_view(start_job("research", q, f"1번 조사: {q}", anchor="a1"))   # 결과 보기 → 1번 후보 목록
 
 
 def discover(conn, body):
@@ -686,7 +686,24 @@ def negotiation(conn, body):
     with LOCK:     # 같은 대상에 같은 작업이 이미 돌고 있으면 거절 (다른 공급처 작업은 동시에 가능)
         if any(j["label"] == label and j["status"] == "running" for j in JOBS.values()):
             return 409, {"error": "같은 작업이 이미 실행 중입니다. 끝난 뒤 다시 눌러 주세요."}
-    return 200, job_view(start_job("neg", args, label))
+    return 200, job_view(start_job("neg", args, label, anchor=neg_anchor(conn, body)))
+
+
+def neg_anchor(conn, body):
+    """5번 작업의 '결과 보기' 위치: 그 공급처 칸(#ps-<연결번호>), 모르면 5번 페이지. (neg_args가 이미 검증한 body)"""
+    ps_id = None
+    try:
+        if body.get("ps_id") not in (None, ""):
+            ps_id = int(body["ps_id"])
+        elif body.get("quote_id") not in (None, ""):
+            r = conn.execute("SELECT product_supplier_id FROM quotes WHERE id = ?", (int(body["quote_id"]),)).fetchone()
+            ps_id = r[0] if r else None
+        elif body.get("message_id") not in (None, ""):
+            r = conn.execute("SELECT product_supplier_id FROM messages WHERE id = ?", (int(body["message_id"]),)).fetchone()
+            ps_id = r[0] if r else None
+    except (TypeError, ValueError):
+        ps_id = None
+    return f"ps-{ps_id}" if ps_id else "a5"
 
 
 def refresh_reference_images(conn):

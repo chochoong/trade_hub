@@ -169,6 +169,15 @@ def test_sample_and_supplier_buttons_and_args(conn):
     raise AssertionError("알 수 없는 공급처 처리는 막아야 함")
 
 
+def test_neg_anchor_defaults(conn):
+    ids = seed(conn)
+    assert server.neg_anchor(conn, {"action": "gmail_sync"}) == "a5"
+    assert server.neg_anchor(conn, {"action": "counter", "quote_id": ids["quote"]}) == f"ps-{ids['ps']}"
+    assert server.neg_anchor(conn, {"action": "mark", "message_id": ids["draft"]}).startswith("ps-")
+    assert server.neg_anchor(conn, {"action": "rfq", "ps_id": "7"}) == "ps-7"
+    assert server.neg_anchor(conn, {"action": "counter", "quote_id": 99999}) == "a5"
+
+
 def test_rfq_form_warns_only_when_supplier_has_no_email(conn):
     ids = seed(conn)
     warn = "공급처 메일 없음 — Gmail에 넣을 때"
