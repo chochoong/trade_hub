@@ -85,8 +85,9 @@ python supervisor.py backup          # 공용 DB 백업 (tick에서 하루 1번 
 | 1. discover | `../supplier_agent` | 연결됨 (주 1회) |
 | 2. sourcing | `../trade_sourcing_agent` | 설정 예시만 (꺼짐) — 공용 DB 연동 필요 |
 | 3. compliance | `../compliance_agent` | 공용 DB 연동됨 (`python -m compliance_agent check-hub` → `compliance_checks`) — 슈퍼바이저 설정은 꺼짐 |
+| 4. costing | `../cost_agent` | 연결됨 — `python -m cost_agent from-hub` (가격이 생기거나 바뀐 공급처 줄의 개당 원가·마진 → `product_suppliers.est_landed_krw·est_margin_pct`) |
 | 5. negotiation | `../negotiation_agent` | 연결됨 — 대시보드 5번 페이지 버튼 + 슈퍼바이저 `auto`(답장 분석·후속 메일) |
-| 4·6·7·8 | 미정 | 설정 예시만 (꺼짐) |
+| 6·7·8 | 미정 | 설정 예시만 (꺼짐) |
 
 ## 5. 테스트
 

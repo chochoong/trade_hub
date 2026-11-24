@@ -193,6 +193,18 @@ def supplier_score(s):
     return (s["trust_reason"] or "").split(" — ")[0]
 
 
+REPORT_IN_TEXT = re.compile(r"\s*\|?\s*([^\s|:]{1,10}):\s*(\S+\.(?:html|md))\s*$")
+
+
+def detail_cell(text, n=90):
+    """할 일 내용. 끝에 '<라벨>: <경로>'(예: '보고서: …html', '문의서: …html')가 있으면
+    경로는 빼고 '<라벨> 열기' 링크로 (3번 문의서, 4번 원가 보고서 등)."""
+    m = REPORT_IN_TEXT.search(text or "")
+    if not m:
+        return clip(text, n)
+    return f"{clip(text[:m.start()], n)} {link(m.group(2), m.group(1) + ' 열기')}".strip()
+
+
 def clip(text, n=90):
     """긴 글은 앞부분만 보이고 펼치면 전체."""
     if not text:
@@ -223,11 +235,11 @@ def pending_tasks(conn):
     out = []
     for r in rows:
         detail = r["detail"] or ""
-        if detail and Path(detail).suffix in (".md", ".html"):
+        if detail and not REPORT_IN_TEXT.search(detail) and Path(detail).suffix in (".md", ".html"):
             html = Path(detail).with_name("report.html")
             detail_html = link(html if html.exists() else detail, "리포트 열기")
         else:
-            detail_html = clip(detail)
+            detail_html = detail_cell(detail)
         out.append([f'<span class="pri p{r["priority"]}">{r["priority"]}</span>', f"#{r['id']}",
                     e(TASK_KIND.get(r["kind"], r["kind"])), e(r["title"]), detail_html, e(r["created_at"][:16])])
     return table(["우선", "번호", "종류", "할 일", "자료", "생성"], out), len(rows)
@@ -698,7 +710,7 @@ def tasks_of(conn, kinds):
                             ORDER BY priority, created_at""", kinds).fetchall()
     return table(["우선", "번호", "할 일", "자료"],
                  [[f'<span class="pri p{r["priority"]}">{r["priority"]}</span>', f"#{r['id']}", e(r["title"]),
-                   clip(r["detail"], 60)] for r in rows])
+                   detail_cell(r["detail"], 60)] for r in rows])
 
 
 VERDICT_CLS = {"go": "ok", "conditional": "warn", "hold": "bad"}
@@ -851,14 +863,49 @@ def compliance_run_bar():
               'LLM API 비용 · 판정만 기록하고 메일·단계는 바꾸지 않음</span></div>')
 
 
+def costing_report_dir(conn):
+    """4번 보고서 폴더 (cost_agent/output/hub) = 마지막 costing 실행 report_dir(.../hub/runs/<번호>)의 두 단계 위."""
+    r = conn.execute("SELECT report_dir FROM agent_runs WHERE agent = 'costing' AND report_dir IS NOT NULL"
+                     " ORDER BY id DESC LIMIT 1").fetchone()
+    return Path(r["report_dir"]).parent.parent if r else None
+
+
 def costing_rows(conn):
-    rows = conn.execute("""SELECT p.id, p.name, s.company, ps.unit_price_usd, ps.est_landed_krw, ps.est_margin_pct, p.est_retail_krw
+    rows = conn.execute("""SELECT p.id, p.name, s.company, ps.id AS ps_id, ps.unit_price_usd, ps.est_landed_krw,
+                                  ps.est_margin_pct, p.est_retail_krw
                            FROM product_suppliers ps JOIN products p ON p.id = ps.product_id JOIN suppliers s ON s.id = ps.supplier_id
                            WHERE ps.est_landed_krw IS NOT NULL ORDER BY ps.est_margin_pct DESC""").fetchall()
-    return table(["품목", "공급처", "FOB", "개당 원가", "판매가", "마진"],
+    rep = costing_report_dir(conn)
+    pinned = costing_pinned(rep)
+
+    def cell(r):
+        if not rep:
+            return ""
+        out = link(rep / f"hub_{r['id']}_ps{r['ps_id']}_report.html", "열기")
+        if pinned.get(r["id"]) == r["ps_id"]:
+            out += ' <span class="ok small" title="5번 목표가·상한가가 이 공급처 기준">✓ 5번 기준</span>'
+        if SERVER["on"] and (rep / f"hub_{r['id']}_ps{r['ps_id']}_handoff.json").exists():
+            out += (f' <button type="button" class="btn" data-act="costneg" data-id="{r["ps_id"]}" '
+                    f'data-name="#{r["id"]} {e(r["name"])} × {e(r["company"])}" '
+                    'title="이 공급처 기준 목표가·상한가를 5번에 넣습니다 (숫자는 화면·공용 DB에 안 나옴)">넘기기</button>')
+        return out
+
+    return table(["품목", "공급처", "FOB", "개당 원가", "판매가", "마진", "보고서"],
                  [[f'#{r["id"]} {e(r["name"])}', e(r["company"]), num(r["unit_price_usd"], "${:g}"),
                    num(r["est_landed_krw"], "{:,}원"), num(r["est_retail_krw"], "{:,}원"),
-                   num(r["est_margin_pct"], "{:.0f}%")] for r in rows])
+                   num(r["est_margin_pct"], "{:.0f}%"), cell(r)] for r in rows])
+
+
+def costing_pinned(rep):
+    """4번이 5번에 넘긴 기준 공급처 {품목: 공급처 줄} (버튼으로 고른 것만). 가격은 읽지 않는다."""
+    f = rep / "negotiation_applied.json" if rep else None
+    if not f or not f.exists():
+        return {}
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+        return {int(k): v.get("ps_id") for k, v in data.items() if isinstance(v, dict) and v.get("ps_id")}
+    except (ValueError, TypeError):
+        return {}
 
 
 def pnl_rows(conn):
@@ -1334,6 +1381,10 @@ document.addEventListener("click", function (ev) {
     var who = b.dataset.id ? "#" + b.dataset.id + " " + b.dataset.name : "공급처 발굴·협상 단계 품목 전체";
     if (!confirm(who + "\\n3번 통관·규제 점검을 다시 할까요? [" + ol + "] (품목당 30초~1분 · LLM API 비용)")) return;
     startJob("/api/compliance", b.dataset.id ? {product_id: Number(b.dataset.id), official: official} : {official: official});
+  } else if (b.dataset.act === "costneg") {
+    if (!confirm(b.dataset.name + "\\n이 공급처 기준 목표가·상한가를 5번 협상 에이전트에 넣을까요?\\n" +
+                 "(5번에 직접 넣어 둔 값도 바뀌고, 이후 자동 갱신도 이 공급처 기준. 메일은 보내지 않음)")) return;
+    startJob("/api/costneg", {ps_id: Number(b.dataset.id)});
   } else if (b.dataset.act === "research") {
     if (!confirm("「" + b.dataset.q + "」을(를) 1번 에이전트로 다시 조사할까요? (1~3분 · API 비용)")) return;
     startJob("/api/research", {query: b.dataset.q});

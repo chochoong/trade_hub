@@ -483,6 +483,30 @@ def test_job_panel_has_stop_button():
     from trade_hub import dashboard
     assert 'data-stop="' in dashboard.SERVER_JS and '"/api/stop"' in dashboard.SERVER_JS
 
+
+# --- 4번 원가 → 5번 [넘기기] ---------------------------------------------------------
+def test_costneg_job_command(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "agent_spec", lambda agent: (tmp_path, "py", 15))
+    cmd, cwd, timeout = ORIGINAL_JOB_COMMAND("cost_neg", 37)
+    assert cmd == ["py", "-m", "cost_agent", "to-negotiation", "37"] and cwd == tmp_path and timeout == 2
+
+
+def test_costneg_route_validates_and_runs(srv, conn, monkeypatch):
+    seen = []
+    real = server.job_command
+    monkeypatch.setattr(server, "job_command", lambda kind, arg: (seen.append((kind, arg)), real(kind, arg))[1])
+    with conn:
+        pid = db.upsert_product(conn, "EVA 케이스", stage="negotiating")
+        sid = db.upsert_supplier(conn, "Allwin", "China")
+        ps = db.link_supplier(conn, pid, sid, unit_price_usd=3.0)
+    code, job = call(srv + "/api/costneg", {"ps_id": ps})
+    assert code == 200 and f"#{pid} EVA 케이스 × Allwin" in job["label"] and job["anchor"] == f"ps-{ps}"
+    wait_job(srv, job["id"])
+    assert seen == [("cost_neg", ps)]
+    assert call(srv + "/api/costneg", {"ps_id": "x"})[0] == 400
+    assert call(srv + "/api/costneg", {"ps_id": 9999})[0] == 404
+
+
 def test_buy_watch_naver_low(srv, monkeypatch, tmp_path):
     from trade_hub import buying as b
     (tmp_path / "web.py").write_text("", encoding="utf-8")

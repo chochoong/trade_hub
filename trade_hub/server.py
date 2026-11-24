@@ -111,11 +111,14 @@ def job_command(kind, arg):
     if kind == "neg":                       # 5번: arg = negotiation_agent 명령 인자 목록 (neg_args가 검증해서 만든 것)
         cwd, python, timeout = agent_spec("negotiation")
         return [python, "-m", "negotiation_agent", *arg], cwd, timeout
+    if kind == "cost_neg":                  # 4번 → 5번: arg = 공급처 줄 번호 (cost_to_negotiation이 검증한 값)
+        cwd, python, _ = agent_spec("costing")
+        return [python, "-m", "cost_agent", "to-negotiation", str(int(arg))], cwd, 2
     raise ValueError(kind)
 
 
 KIND_AGENT = {"research": "discover", "discover": "discover", "sourcing": "sourcing", "compliance": "compliance",
-              "neg": "negotiation", "buysearch": "buyagent"}
+              "neg": "negotiation", "buysearch": "buyagent", "cost_neg": "costing"}
 # 3번 관세청 공식 데이터 대조: api = HS·관세율 파일 + 세관장확인 API(인증키 DATA_GO_KR_KEY) / files = 파일만 / off
 OFFICIAL_MODES = {"api": "공식 대조(파일+API)", "files": "공식 대조(파일만)", "off": "공식 대조 안 함"}
 # 3번 실행에 넘길 키 (서버를 켠 뒤에 넣은 키도 쓰도록): 이 서버 환경변수 > 3번 폴더 .env > trade_hub .env > Windows 사용자 환경변수
@@ -126,9 +129,10 @@ BUY_MARKETS = buying.BUY_MARKETS
 
 
 def allowed_roots():
-    """/file 로 보여 줄 수 있는 폴더: 확정 사진(data/images), 1번 리포트, 2번 출력, 3번 보고서. (DB 파일·백업·.env는 제외)"""
+    """/file 로 보여 줄 수 있는 폴더: 확정 사진(data/images), 1번 리포트, 2번 출력, 3번 보고서, 4번 보고서.
+    (DB 파일·백업·.env는 제외. 서버는 127.0.0.1에만 열림)"""
     roots = [db.images_dir().resolve()]
-    for agent, sub in (("discover", "reports"), ("sourcing", "output"), ("compliance", "output")):
+    for agent, sub in (("discover", "reports"), ("sourcing", "output"), ("compliance", "output"), ("costing", "output")):
         try:
             roots.append((agent_spec(agent)[0] / sub).resolve())
         except Exception:
@@ -444,6 +448,21 @@ def compliance(conn, body):
     target = f"#{pid} {row['name']}" if pid else "진행 품목 전체"
     return 200, job_view(start_job("compliance", (pid, official), f"3번 통관·규제 점검 ({OFFICIAL_MODES[official]}): {target}",
                                    product_id=pid, anchor="a3"))   # 끝나면 3번 페이지로
+
+
+def cost_to_negotiation(conn, body):
+    """4번 원가 표의 '넘기기': 이 공급처 줄 기준 목표가·상한가를 5번 로컬 private.db에 넣는다.
+    값은 cost_agent가 직접 옮기고, 이 서버·공용 DB·화면에는 숫자가 오지 않는다."""
+    try:
+        ps_id = int(body.get("ps_id"))
+    except (TypeError, ValueError):
+        return 400, {"error": "공급처 줄 번호가 올바르지 않습니다."}
+    row = conn.execute("SELECT ps.product_id, p.name, s.company FROM product_suppliers ps JOIN products p ON p.id = ps.product_id"
+                       " JOIN suppliers s ON s.id = ps.supplier_id WHERE ps.id = ?", (ps_id,)).fetchone()
+    if row is None:
+        return 404, {"error": f"공급처 줄 {ps_id}가 없습니다."}
+    return 200, job_view(start_job("cost_neg", ps_id, f"4번 → 5번 협상 기준 넘기기: #{row['product_id']} {row['name']} × {row['company']}",
+                                   product_id=row["product_id"], anchor=f"ps-{ps_id}"))   # 결과 보기 → 5번 페이지의 그 공급처 (없으면 5번 페이지)
 
 
 def buy_search(conn, body):
@@ -763,7 +782,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return self._send(400, {"error": "요청 형식 오류"})
         route = {"/api/research": research, "/api/discover": discover, "/api/select": select, "/api/compliance": compliance, "/api/stop": stop,
-                 "/api/neg": negotiation, "/api/buysearch": buy_search,
+                 "/api/neg": negotiation, "/api/costneg": cost_to_negotiation, "/api/buysearch": buy_search,
                  "/api/translate": buy_translate, "/api/buywatch": buy_watch}.get(urlparse(self.path).path)
         if not route:
             return self._send(404, {"error": "없는 주소"})

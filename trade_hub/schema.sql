@@ -6,7 +6,8 @@
 --  sourcing    2. 공급처 발굴              → suppliers, product_suppliers
 --  compliance  3. 통관·규제 체크            → compliance_checks(supplier_questions 포함), tasks(decision: 보류 판정·관세사 문의 준비)
 --                                          (products.hs_code·duty_rate·fta_note는 관세사 확인 후 사람이 입력 — 에이전트는 후보만)
---  costing     4. 원가·수익 계산            → product_suppliers.est_landed_krw·est_margin_pct
+--  costing     4. 원가·수익 계산            → product_suppliers.est_landed_krw·est_margin_pct, tasks(decision: 포기선 마진 미달 / other: 협상 기준 반영)
+--                                          (목표가·포기 가격은 공용 DB에 쓰지 않음 — cost_agent/output/hub 보고서에만)
 --  negotiation 5. 커뮤니케이션·협상         → messages(초안), quotes, product_suppliers.supplier_specs_json
 --  documents   6. 무역서류                 → (PI·CI·PL·계약서 초안: 파일 경로를 tasks/notes에)
 --  sales       7. 판매·마케팅              → sales

@@ -339,3 +339,58 @@ def test_compliance_page_broker_request_and_basis_supplier(conn, tmp_path):
     with conn:                                                                      # 기록 없는 예전 판정: 지금 대표 표시
         conn.execute("UPDATE compliance_checks SET basis_ps_id = NULL")
     assert "판정 기준 공급처: Picked Co (선정)" in dashboard.render(conn)
+
+
+def test_task_detail_report_path_becomes_link(tmp_path):
+    rep = tmp_path / "hub_1_ps2_report.html"
+    rep.write_text("x", encoding="utf-8")
+    cell = dashboard.detail_cell(f"5번 협상 기준을 자동으로 넣었습니다. | 보고서: {rep}")
+    assert "보고서 열기" in cell and "<a href=" in cell and str(rep) not in cell.split("<a")[0]
+    assert dashboard.detail_cell("보고서 없는 글") == "보고서 없는 글"
+    assert "파일 없음" in dashboard.detail_cell(f"글 | 보고서: {tmp_path / 'none.html'}")
+
+
+def test_costing_page_links_supplier_report(conn, tmp_path):
+    hub_dir = tmp_path / "output" / "hub"
+    with db.agent_run(conn, "costing") as run:
+        run.report_dir = str(hub_dir / "runs" / str(run.id))
+    with conn:
+        pid = db.upsert_product(conn, "EVA 케이스", stage="negotiating")
+        sid = db.upsert_supplier(conn, "Allwin", "China")
+        ps = db.link_supplier(conn, pid, sid, unit_price_usd=3.0)
+        conn.execute("UPDATE product_suppliers SET est_landed_krw = 5000, est_margin_pct = 30 WHERE id = ?", (ps,))
+    hub_dir.mkdir(parents=True)
+    (hub_dir / f"hub_{pid}_ps{ps}_report.html").write_text("x", encoding="utf-8")
+    html = dashboard.costing_rows(conn)
+    assert f"hub_{pid}_ps{ps}_report.html" in html and "<a href=" in html
+
+
+def test_pending_task_text_ending_with_path_not_treated_as_path(conn, tmp_path):
+    rep = tmp_path / "broker_request.html"
+    rep.write_text("x", encoding="utf-8")
+    with conn:
+        db.add_task(conn, "other", "관세사 문의", detail=f"물을 것 5개 | 문의서: {rep}")
+    html, n = dashboard.pending_tasks(conn)
+    assert n == 1 and "문의서 열기" in html and "파일 없음" not in html and "물을 것 5개" in html
+
+
+def test_costing_page_send_button_only_in_server_mode(conn, tmp_path, monkeypatch):
+    import json as _json
+    hub_dir = tmp_path / "output" / "hub"
+    with db.agent_run(conn, "costing") as run:
+        run.report_dir = str(hub_dir / "runs" / str(run.id))
+    with conn:
+        pid = db.upsert_product(conn, "EVA 케이스", stage="negotiating")
+        sid = db.upsert_supplier(conn, "Allwin", "China")
+        ps = db.link_supplier(conn, pid, sid, unit_price_usd=3.0)
+        conn.execute("UPDATE product_suppliers SET est_landed_krw = 5000, est_margin_pct = 30 WHERE id = ?", (ps,))
+    hub_dir.mkdir(parents=True)
+    (hub_dir / f"hub_{pid}_ps{ps}_handoff.json").write_text("{}", encoding="utf-8")
+    assert 'data-act="costneg"' not in dashboard.costing_rows(conn)          # 파일로 연 대시보드엔 버튼 없음
+    monkeypatch.setitem(dashboard.SERVER, "on", True)
+    html = dashboard.costing_rows(conn)
+    assert f'data-act="costneg" data-id="{ps}"' in html and "5번 기준" not in html
+    (hub_dir / "negotiation_applied.json").write_text(
+        _json.dumps({str(pid): {"target": 2.5, "max": 2.9, "ps_id": ps}}), encoding="utf-8")
+    html = dashboard.costing_rows(conn)
+    assert "✓ 5번 기준" in html and "2.9" not in html                         # 가격은 화면에 안 나옴

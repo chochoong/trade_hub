@@ -43,10 +43,11 @@
       "timeout_minutes": 30
     },
     "costing": {
-      "enabled": false,
-      "command": ["{python}", "costing_agent.py"],
-      "cwd": "../costing_agent",
-      "when_sql": "SELECT COUNT(*) FROM product_suppliers WHERE unit_price_usd IS NOT NULL AND est_landed_krw IS NULL",
+      "enabled": true,
+      "command": ["{python}", "-m", "cost_agent", "from-hub"],
+      "cwd": "../cost_agent",
+      "_when": "가격(웹 단가·받은 견적)이 있는 sourcing·negotiating·sampling 단계 공급처 줄 중 원가 계산이 없거나, 마지막 계산 뒤에 공급처 줄·품목·견적·통관 판정이 바뀐 것. cost_agent/cost_agent/hub.py PENDING_SQL과 같은 조건 — 바꾸면 같이 바꿀 것",
+      "when_sql": "SELECT COUNT(*) FROM (SELECT ps.id FROM product_suppliers ps JOIN products p ON p.id = ps.product_id WHERE p.stage IN ('sourcing', 'negotiating', 'sampling') AND ps.status != 'rejected' AND (ps.unit_price_usd IS NOT NULL OR EXISTS (SELECT 1 FROM quotes q WHERE q.product_supplier_id = ps.id)) AND (ps.est_landed_krw IS NULL OR ps.updated_at > (SELECT MAX(r.started_at) FROM agent_runs r WHERE r.agent = 'costing' AND r.status = 'succeeded') OR p.updated_at > (SELECT MAX(r.started_at) FROM agent_runs r WHERE r.agent = 'costing' AND r.status = 'succeeded') OR EXISTS (SELECT 1 FROM quotes q WHERE q.product_supplier_id = ps.id AND q.created_at > (SELECT MAX(r.started_at) FROM agent_runs r WHERE r.agent = 'costing' AND r.status = 'succeeded')) OR EXISTS (SELECT 1 FROM compliance_checks c WHERE c.product_id = p.id AND c.created_at > (SELECT MAX(r.started_at) FROM agent_runs r WHERE r.agent = 'costing' AND r.status = 'succeeded'))) ORDER BY ps.product_id, ps.id)",
       "min_interval_hours": 6,
       "timeout_minutes": 15
     },
