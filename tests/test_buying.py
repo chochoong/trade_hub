@@ -149,7 +149,7 @@ def test_search_form_only_in_server_mode(ba):
     assert html.index('value="rakuten"') < html.index('value="ebay"') < html.index('value="china"')
     assert 'value="aliexpress"' not in html and "타오바오·1688(중국어" not in html     # 중국 항목 하나로 합침
     assert '<option value="china" data-lang="zh">중국(타오바오·1688·알리 · 중국어 · 링크만)</option>' in html
-    assert "알리·이베이는 buyagent에 API 키" not in html and "이베이는 buyagent에 API 키 필요" in html
+    assert "알리·이베이는 buyagent에 API 키" not in html and "야후는 buyagent에 앱 ID, 이베이는 API 키 필요" in html
     assert 'title="영어로 번역 (이베이용)"' in html and 'title="중국어로 번역 (중국(타오바오·1688·알리) 링크용)"' in html
     assert '<option value="ebay" data-lang="en">이베이(미국·영어로 검색)</option>' in html
 
@@ -309,8 +309,19 @@ def test_china_option_links_only_no_api_search():
     for site in ("https://s.taobao.com/search?q=", "https://s.1688.com/selloffer/offer_search.htm",
                  "https://www.aliexpress.com/w/wholesale-"):
         assert site in js
-    assert [k for k, _ in buying.SITE_OPTIONS] == ["rakuten", "ebay", "china"]
-    assert "aliexpress" in buying.BUY_MARKETS                    # 서버 허용 값에는 남김 (화면에서만 안 부름)
+    assert [k for k, _ in buying.SITE_OPTIONS] == ["rakuten", "yahoo", "ebay", "china"]
+    assert "aliexpress" in buying.BUY_MARKETS and "yahoo" in buying.BUY_MARKETS   # 서버 허용 값 (알리는 화면에서만 안 부름)
+
+
+def test_yahoo_option_only_when_buyagent_accepts_market(tmp_path):
+    main = tmp_path / "main.py"
+    main.write_text('SEARCH_MARKETS = {\n    "rakuten": {"lang": "ja"},\n    "ebay": {"lang": "en"},\n}\n', encoding="utf-8")
+    assert [k for k, _ in buying.site_options(tmp_path)] == ["rakuten", "ebay", "china"]
+    main.write_text('SEARCH_MARKETS = {\n    "rakuten": {"lang": "ja"},\n    "yahoo": {"lang": "ja", "sources": ["yahoo"]},\n}\n',
+                    encoding="utf-8")
+    assert [k for k, _ in buying.site_options(tmp_path)] == ["rakuten", "yahoo", "ebay", "china"]
+    assert [k for k, _ in buying.site_options(tmp_path / "none")] == ["rakuten", "ebay", "china"]
+    assert buying.SITE_LANG["yahoo"] == "ja"
 
 
 @pytest.mark.skipif(not REAL_WEB.is_file(), reason="buyagent web.py 없음")

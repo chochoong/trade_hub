@@ -484,7 +484,7 @@ def buy_search(conn, body):
         return 400, {"error": "카테고리를 골라 주세요."}
     market = str(body.get("market") or "rakuten")
     if market not in BUY_MARKETS:
-        return 400, {"error": "자동 검색 사이트는 라쿠텐·알리익스프레스·이베이 중에서 골라 주세요."}
+        return 400, {"error": "자동 검색 사이트는 라쿠텐·야후·알리익스프레스·이베이 중에서 골라 주세요."}
     with LOCK:
         if any(j["kind"] == "buysearch" and j["status"] == "running" for j in JOBS.values()):
             return 409, {"error": "직접 검색이 이미 실행 중입니다. 끝난 뒤 다시 눌러 주세요."}

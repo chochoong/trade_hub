@@ -1425,7 +1425,7 @@ document.addEventListener("click", function (ev) {   // 언어 버튼: 번역 + 
   }
   buyTranslate(f, lang).catch(function (err) { alert(err.message); });
 });
-document.addEventListener("submit", function (ev) {   // 검색 → 라쿠텐·이베이: /api/buysearch (buyagent --market) · 중국: 중국어 번역 + 타오바오·1688·알리 링크만 (API 안 부름)
+document.addEventListener("submit", function (ev) {   // 검색 → 라쿠텐·야후·이베이: /api/buysearch (buyagent --market) · 중국: 중국어 번역 + 타오바오·1688·알리 링크만 (API 안 부름)
   var f = ev.target.closest("form.buysearch");
   if (!f) return;
   ev.preventDefault();

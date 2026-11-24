@@ -250,7 +250,7 @@ def test_buy_search_site_picks_market(srv, monkeypatch, tmp_path):
     assert code == 200 and seen[-1][2] == "ebay" and "이베이" in job["label"]
     wait_job(srv, job["id"])
     code, out = call(srv + "/api/buysearch", {"query": "精工", "category": "watch", "market": "china"})
-    assert code == 400 and "라쿠텐·알리익스프레스·이베이" in out["error"]   # 타오바오·1688은 자동 검색 없음 (화면은 링크)
+    assert code == 400 and "라쿠텐·야후·알리익스프레스·이베이" in out["error"]   # 타오바오·1688은 자동 검색 없음 (화면은 링크)
     assert call(srv + "/api/buysearch", {"query": "x", "category": ""})[0] == 400              # 카테고리 미선택
 
 

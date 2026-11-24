@@ -492,18 +492,37 @@ def _latest_section(data):
 
 LANG_BUTTONS = [   # (언어, 버튼 이름, 설명) — 번역만 함. 검색할 사이트는 사이트 메뉴가 정함
     ("en", "영어", "영어로 번역 (이베이용)"),
-    ("ja", "일본어", "일본어로 번역 (라쿠텐용)"),
+    ("ja", "일본어", "일본어로 번역 (라쿠텐·야후용)"),
     ("zh", "중국어", "중국어로 번역 (중국(타오바오·1688·알리) 링크용)"),
 ]
 # /api/buysearch 허용 값 = buyagent main.py SEARCH_MARKETS(--market)와 같은 값.
 # aliexpress(알리 제휴 API·영어 검색)는 서버에 남겨 두지만 화면 메뉴에서는 뺌 — 알리 키를 받으면 다시 넣을지 정함 (buyagent 요청 2026-11-20)
-BUY_MARKETS = {"rakuten": "라쿠텐(일본·일본어로 검색)", "aliexpress": "알리익스프레스(중국·영어로 검색)",
-               "ebay": "이베이(미국·영어로 검색)"}
-# 사이트 메뉴: 라쿠텐 / 이베이 / 중국. china = 자동 검색 없이 중국어 검색 링크만 (타오바오·1688·알리, 화면 JS buyLinks)
-SITE_OPTIONS = [("rakuten", BUY_MARKETS["rakuten"]), ("ebay", BUY_MARKETS["ebay"]),
+BUY_MARKETS = {"rakuten": "라쿠텐(일본·일본어로 검색)", "yahoo": "야후 쇼핑(일본·일본어로 검색)",
+               "aliexpress": "알리익스프레스(중국·영어로 검색)", "ebay": "이베이(미국·영어로 검색)"}
+# 사이트 메뉴: 라쿠텐 / 야후 / 이베이 / 중국. china = 자동 검색 없이 중국어 검색 링크만 (타오바오·1688·알리, 화면 JS buyLinks)
+# yahoo는 buyagent main.py SEARCH_MARKETS에 "yahoo"가 있을 때만 메뉴에 보임 (site_options) — 앱 ID(일본 휴대폰 인증)는 buyagent 설정
+SITE_OPTIONS = [("rakuten", BUY_MARKETS["rakuten"]), ("yahoo", BUY_MARKETS["yahoo"]), ("ebay", BUY_MARKETS["ebay"]),
                 ("china", "중국(타오바오·1688·알리 · 중국어 · 링크만)")]
-SITE_LANG = {"rakuten": "ja", "aliexpress": "en", "ebay": "en", "china": "zh"}   # 언어 버튼 ↔ 사이트 맞춤 (화면 JS)
-SITE_SHORT = {"rakuten": "라쿠텐", "aliexpress": "알리익스프레스", "ebay": "이베이"}
+SITE_LANG = {"rakuten": "ja", "yahoo": "ja", "aliexpress": "en", "ebay": "en", "china": "zh"}   # 언어 버튼 ↔ 사이트 맞춤 (화면 JS)
+SITE_SHORT = {"rakuten": "라쿠텐", "yahoo": "야후", "aliexpress": "알리익스프레스", "ebay": "이베이"}
+NEEDS_BUYAGENT_MARKET = {"yahoo"}     # buyagent --market 이 받을 때만 메뉴에 넣는 사이트
+
+
+def buyagent_markets(base):
+    """buyagent main.py SEARCH_MARKETS 키 (파일 글자로 읽음 — import하지 않음). 못 읽으면 None."""
+    import re
+    try:
+        src = (Path(base) / "main.py").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    m = re.search(r"^SEARCH_MARKETS\s*=\s*\{(.*?)^\}", src, re.S | re.M)
+    return set(re.findall(r'^\s*"(\w+)"\s*:', m.group(1), re.M)) if m else None
+
+
+def site_options(base):
+    """화면 사이트 메뉴: buyagent가 아직 못 받는 사이트(yahoo)는 뺌."""
+    have = buyagent_markets(base) or set()
+    return [(k, n) for k, n in SITE_OPTIONS if k not in NEEDS_BUYAGENT_MARKET or k in have]
 
 
 def _search_section(data):
@@ -514,7 +533,7 @@ def _search_section(data):
         # 카테고리는 미리 고르지 않음: 배송비·최소 마진이 카테고리마다 달라 잘못 고르면 권장가가 크게 틀림
         opts = '<option value="">카테고리 선택</option>' + "".join(
             f'<option value="{e(k)}">{e(n)}</option>' for k, n in categories(data["dir"]))
-        sites = "".join(f'<option value="{k}" data-lang="{SITE_LANG[k]}">{e(n)}</option>' for k, n in SITE_OPTIONS)
+        sites = "".join(f'<option value="{k}" data-lang="{SITE_LANG[k]}">{e(n)}</option>' for k, n in site_options(data["dir"]))
         langs = "".join(
             f'<button type="button" class="buylang" data-lang="{k}" title="{e(t)}">{e(n)}</button>'
             for k, n, t in LANG_BUTTONS)
@@ -527,7 +546,7 @@ def _search_section(data):
                f'<button type="submit">🔎 검색</button></form>'
                '<div class="buylinks small"></div>'
                '<p class="small muted"><b>사이트</b>를 고르고 검색하면 한글 검색어는 그 사이트 언어로 자동 번역됩니다 '
-               '(라쿠텐 30초~1분 · 이베이는 buyagent에 API 키 필요). 언어 버튼은 번역 결과를 미리 보고 고치는 용도입니다 (1원 미만). '
+               '(라쿠텐 30초~1분 · 야후는 buyagent에 앱 ID, 이베이는 API 키 필요). 언어 버튼은 번역 결과를 미리 보고 고치는 용도입니다 (1원 미만). '
                '<b>중국</b>은 자동 검색 없이 중국어로 바꾼 검색 링크(타오바오·1688·알리)만 보여 줍니다. '
                '<b>카테고리</b>는 꼭 맞게 고르세요 — 배송비·최소 마진이 달라 권장가가 크게 바뀝니다. '
                '모델명(예: SBTQ041)을 넣으면 그 단어가 들어간 상품만 남깁니다. 감시 목록·가격 이력·알림에는 영향 없습니다.</p>')
