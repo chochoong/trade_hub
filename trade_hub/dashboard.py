@@ -245,6 +245,32 @@ def pending_tasks(conn):
     return table(["우선", "번호", "종류", "할 일", "자료", "생성"], out), len(rows)
 
 
+def demand_trend(nv):
+    """1번 naver_json.shopping_insight(네이버 쇼핑인사이트 클릭 추세) 짧은 표기 — '수요 추세'만 (가격·판매처 아님).
+    series는 키워드마다 자기 최대=100이라 품목끼리 크기 비교는 안 됨 (비교는 검색량 volume_idx)."""
+    si = nv.get("shopping_insight") if isinstance(nv, dict) else None
+    if not isinstance(si, dict):
+        if isinstance(nv, dict) and "shop_category" in nv and not nv.get("shop_category"):
+            return '<span class="muted" title="1번이 네이버쇼핑 분야를 정하지 못해 쇼핑인사이트를 조회하지 않음">분야 미정</span>'
+        return '<span class="muted">–</span>'
+    sea = si.get("seasonal") if isinstance(si.get("seasonal"), dict) else {}
+    peak = str(sea.get("peak_month") or "")
+    season = f"계절 {int(peak[5:7])}월" if sea.get("is_seasonal") and peak[5:7].isdigit() else ""
+    trend, ch = si.get("trend"), si.get("change_3m")
+    if trend:
+        cls = {"오름": "up", "내림": "down"}.get(trend, "")
+        text = f'<span class="{cls}">{e(trend)}' + (f" {ch:+.0f}%" if isinstance(ch, (int, float)) else "") + "</span>"
+    else:
+        text = "최근 클릭 적음" if season else "데이터 적음"
+    if season:
+        text += f" · {season}"
+    months, series = si.get("months") or [], si.get("series") or []
+    tip = (f'네이버 쇼핑인사이트 · {si.get("category") or ""} · 「{si.get("keyword") or ""}」 클릭 추세 (최근 3개월 ÷ 그 전 3개월)\n'
+           "키워드 자기 최대=100 상대값이라 품목끼리 크기 비교는 검색량으로\n"
+           + " ".join(f"{str(m)[2:]}:{v:g}" for m, v in zip(months, series) if isinstance(v, (int, float))))
+    return f'<span class="small" title="{e(tip)}">{text}</span>'
+
+
 def candidate_rows(conn):
     rows = conn.execute("""
         SELECT p.*, s.total, s.demand, s.margin, s.competition, s.regulation, s.logistics, s.est_fob_usd,
@@ -266,11 +292,11 @@ def candidate_rows(conn):
                     f'<div class="pcell">{photo(r)}<div>{e(r["name"])}<div class="muted small">{e(r["category"])} · {sub}</div>'
                     f'<div class="small">{search_links(r)}</div></div></div>',
                     num(nv.get("volume_idx"), "{:g}") if nv else '<span class="muted">–</span>',
-                    pct(nv.get("growth_3m")) if nv else "", pct(nv.get("yoy")) if nv else "",
+                    pct(nv.get("growth_3m")) if nv else "", pct(nv.get("yoy")) if nv else "", demand_trend(nv),
                     num(r["est_fob_usd"], "${:g}"), num(r["est_retail_krw"], "{:,}원"),
                     clip(r["reason"], 60), report]
                    + ([actions(r)] if SERVER["on"] else []))
-    heads = ["번호", "점수", "품목", "검색량", "3개월", "전년比", "FOB", "판매가", "선정 이유", "리포트"]
+    heads = ["번호", "점수", "품목", "검색량", "3개월", "전년比", "수요 추세", "FOB", "판매가", "선정 이유", "리포트"]
     return table(heads + (["작업"] if SERVER["on"] else []), out), len(rows)
 
 

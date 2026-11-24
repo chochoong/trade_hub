@@ -433,3 +433,18 @@ def test_compliance_row_costing_button_and_costing_grouped(conn, monkeypatch):
     assert cost.count(f'id="cost-{a}"') == 1 and "판매가 없음" in cost
     assert cost.index("Allwin") < cost.index("Bolt")                           # 같은 품목끼리 묶고 마진 있는 줄 먼저
     assert 'b.dataset.act === "costing"' in dashboard.SERVER_JS and "(ps|cost)-" in dashboard.SEARCH_JS
+
+
+def test_demand_trend_short_text():
+    si = {"cid": "50000008", "category": "생활/건강", "keyword": "실리콘 찜기", "months": ["2025-11", "2025-12"],
+          "series": [40, 100], "change_3m": 24, "trend": "오름",
+          "seasonal": {"is_seasonal": True, "peak_month": "2025-12", "peak_to_mean": 4.8}}
+    t = dashboard.demand_trend({"shop_category": "생활/건강", "shopping_insight": si})
+    assert '<span class="up">오름 +24%</span> · 계절 12월' in t and "쇼핑인사이트" in t and "25-12:100" in t
+    t = dashboard.demand_trend({"shopping_insight": {**si, "trend": None, "change_3m": None,
+                                                     "seasonal": {"is_seasonal": True, "peak_month": "2026-01"}}})
+    assert "최근 클릭 적음 · 계절 1월" in t
+    assert "데이터 적음" in dashboard.demand_trend({"shopping_insight": {**si, "trend": None, "seasonal": None}})
+    assert "분야 미정" in dashboard.demand_trend({"volume_idx": 3, "shop_category": None})
+    assert dashboard.demand_trend({"volume_idx": 3}) == '<span class="muted">–</span>'        # 기존 품목 (칸 없음)
+    assert dashboard.demand_trend({}) == '<span class="muted">–</span>'
