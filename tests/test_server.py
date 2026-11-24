@@ -533,3 +533,29 @@ def test_buy_watch_naver_low(srv, monkeypatch, tmp_path):
     assert call(srv + "/api/buywatch", {"action": "naver_low", "id": "w1", "price": "1" * 21})[0] == 400
     assert seen == [("naver_low", {"id": "w1", "price": "165,000", "memo": "스토어A"}),
                     ("naver_low", {"id": "w1", "price": "", "memo": ""})]
+
+
+# --- 3번 화면 [4번 원가 계산] -------------------------------------------------------
+def test_costing_job_command(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "agent_spec", lambda agent: (tmp_path, "py", 15))
+    assert ORIGINAL_JOB_COMMAND("costing", 36) == (["py", "-m", "cost_agent", "from-hub", "36"], tmp_path, 15)
+    assert server.KIND_AGENT["costing"] == "costing"
+
+
+def test_costing_route_validates_and_runs(srv, conn, monkeypatch):
+    seen = []
+    real = server.job_command
+    monkeypatch.setattr(server, "job_command", lambda kind, arg: (seen.append((kind, arg)), real(kind, arg))[1])
+    with conn:
+        pid = db.upsert_product(conn, "EVA 케이스", stage="sourcing")
+        bare = db.upsert_product(conn, "가격 없음", stage="sourcing")
+        sid = db.upsert_supplier(conn, "Allwin", "China")
+        db.link_supplier(conn, pid, sid, unit_price_usd=3.0)
+        db.link_supplier(conn, bare, sid)
+    code, job = call(srv + "/api/costing", {"product_id": pid})
+    assert code == 200 and f"#{pid} EVA 케이스" in job["label"] and job["anchor"] == f"cost-{pid}"
+    wait_job(srv, job["id"])
+    assert seen == [("costing", pid)]
+    assert call(srv + "/api/costing", {"product_id": bare})[0] == 400
+    assert call(srv + "/api/costing", {"product_id": "x"})[0] == 400
+    assert call(srv + "/api/costing", {"product_id": 9999})[0] == 404

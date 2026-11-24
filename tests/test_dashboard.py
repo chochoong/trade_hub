@@ -406,3 +406,30 @@ def test_long_card_scrolls_to_title_below_sticky_bar():
     js = dashboard.SEARCH_JS
     assert 'row.scrollIntoView({block: row.offsetHeight > innerHeight * 0.8 ? "start" : "center"});' in js
     assert 'row.style.scrollMarginTop' in js and 'document.querySelector(".top")' in js
+
+
+def test_compliance_row_costing_button_and_costing_grouped(conn, monkeypatch):
+    with conn:
+        a = db.upsert_product(conn, "벽선반", stage="sourcing")
+        b = db.upsert_product(conn, "키캡", stage="sourcing")
+        n = db.upsert_product(conn, "판정 없음", stage="sourcing")
+        sid = db.upsert_supplier(conn, "Allwin", "China")
+        sid2 = db.upsert_supplier(conn, "Bolt", "China")
+        pa = db.link_supplier(conn, a, sid, unit_price_usd=3.0)
+        pa2 = db.link_supplier(conn, a, sid2, unit_price_usd=2.0)
+        db.link_supplier(conn, b, sid)                                         # 가격 없음
+        db.link_supplier(conn, n, sid, unit_price_usd=1.0)
+        db.save_compliance_check(conn, a, None, "go", "2026-11-24")
+        db.save_compliance_check(conn, b, None, "go", "2026-11-24")
+        conn.execute("UPDATE product_suppliers SET est_landed_krw = 5000, est_margin_pct = 10 WHERE id = ?", (pa,))
+        conn.execute("UPDATE product_suppliers SET est_landed_krw = 4000, est_margin_pct = NULL WHERE id = ?", (pa2,))
+        conn.execute("UPDATE products SET est_retail_krw = NULL WHERE id = ?", (a,))
+    monkeypatch.setitem(dashboard.SERVER, "on", True)
+    html = dashboard.compliance_rows(conn)
+    assert f'data-act="costing" data-id="{a}"' in html
+    assert f'data-act="costing" data-id="{b}"' not in html and 'disabled title="가격(웹 단가·견적) 있는 공급처 줄 없음"' in html
+    assert f'data-act="costing" data-id="{n}"' not in html                    # 판정 없는 품목엔 버튼 없음
+    cost = dashboard.costing_rows(conn)
+    assert cost.count(f'id="cost-{a}"') == 1 and "판매가 없음" in cost
+    assert cost.index("Allwin") < cost.index("Bolt")                           # 같은 품목끼리 묶고 마진 있는 줄 먼저
+    assert 'b.dataset.act === "costing"' in dashboard.SERVER_JS and "(ps|cost)-" in dashboard.SEARCH_JS

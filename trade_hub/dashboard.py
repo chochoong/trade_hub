@@ -829,6 +829,24 @@ def broker_line(conn):
             '보내기는 직접)</span></p>')
 
 
+def priced_lines(conn, product_id):
+    """4번이 계산할 수 있는 공급처 줄 수 = 버린 것 빼고 웹 단가나 받은 견적이 있는 줄 (cost_agent select_ps와 같은 조건)."""
+    return conn.execute("SELECT COUNT(*) FROM product_suppliers ps WHERE ps.product_id = ? AND ps.status != 'rejected'"
+                        " AND (ps.unit_price_usd IS NOT NULL OR EXISTS (SELECT 1 FROM quotes q WHERE q.product_supplier_id = ps.id))",
+                        (product_id,)).fetchone()[0]
+
+
+def costing_button(conn, r, c):
+    """3번 줄의 [4번 원가 계산] — 판정이 있는 품목만. 가격 있는 공급처 줄이 없으면 꺼 둠."""
+    if c is None:
+        return ""
+    if not priced_lines(conn, r["id"]):
+        return (' <button type="button" class="btn" disabled title="가격(웹 단가·견적) 있는 공급처 줄 없음">'
+                '4번 원가 계산</button>')
+    return (f' <button type="button" class="btn" data-act="costing" data-id="{r["id"]}" data-name="{e(r["name"])}" '
+            'title="이 품목의 가격 있는 공급처 줄을 4번으로 지금 다시 계산 (LLM 비용 없음)">4번 원가 계산</button>')
+
+
 def compliance_rows(conn):
     rows = conn.execute(f"""SELECT * FROM products WHERE stage NOT IN ('candidate', 'dropped')
                             ORDER BY {db.stage_order_sql()} DESC, id""").fetchall()
@@ -846,7 +864,7 @@ def compliance_rows(conn):
                     hs_cell, duty_cell(r, c), clip(r["fta_note"], 40),
                     clip(r["regulations"], 70)]
                    + ([f'<button type="button" class="btn" data-act="compliance" data-id="{r["id"]}" data-name="{e(r["name"])}">'
-                       f'{"다시 점검" if c else "점검"}</button>'] if SERVER["on"] else []))
+                       f'{"다시 점검" if c else "점검"}</button>' + costing_button(conn, r, c)] if SERVER["on"] else []))
     return table(["품목", "단계", "최신 판정", "필요 인증·요건", "HS 코드", "관세율", "FTA", "메모(인증·규제)"]
                  + (["작업"] if SERVER["on"] else []), out)
 
@@ -874,7 +892,9 @@ def costing_rows(conn):
     rows = conn.execute("""SELECT p.id, p.name, s.company, ps.id AS ps_id, ps.unit_price_usd, ps.est_landed_krw,
                                   ps.est_margin_pct, p.est_retail_krw
                            FROM product_suppliers ps JOIN products p ON p.id = ps.product_id JOIN suppliers s ON s.id = ps.supplier_id
-                           WHERE ps.est_landed_krw IS NOT NULL ORDER BY ps.est_margin_pct DESC""").fetchall()
+                           WHERE ps.est_landed_krw IS NOT NULL
+                           ORDER BY MAX(ps.est_margin_pct) OVER (PARTITION BY p.id) DESC NULLS LAST, p.id,
+                                    ps.est_margin_pct DESC NULLS LAST, ps.id""").fetchall()   # 품목별로 묶음 (마진 좋은 품목 먼저)
     rep = costing_report_dir(conn)
     pinned = costing_pinned(rep)
 
@@ -890,10 +910,22 @@ def costing_rows(conn):
                     'title="이 공급처 기준 목표가·상한가를 5번에 넣습니다 (숫자는 화면·공용 DB에 안 나옴)">넘기기</button>')
         return out
 
+    def margin(r):
+        if r["est_margin_pct"] is None and r["est_retail_krw"] is None:
+            return '<span class="muted" title="품목 판매가(est_retail_krw)가 없어 마진을 계산하지 못함">판매가 없음</span>'
+        return num(r["est_margin_pct"], "{:.0f}%")
+
+    seen = set()
+
+    def name(r):                    # 품목 첫 줄에 #cost-<품목> (3번 [4번 원가 계산]의 '결과 보기'가 여기로)
+        anchor = "" if r["id"] in seen else f'<span class="anchor" id="cost-{r["id"]}"></span>'
+        seen.add(r["id"])
+        return f'{anchor}#{r["id"]} {e(r["name"])}'
+
     return table(["품목", "공급처", "FOB", "개당 원가", "판매가", "마진", "보고서"],
-                 [[f'#{r["id"]} {e(r["name"])}', e(r["company"]), num(r["unit_price_usd"], "${:g}"),
+                 [[name(r), e(r["company"]), num(r["unit_price_usd"], "${:g}"),
                    num(r["est_landed_krw"], "{:,}원"), num(r["est_retail_krw"], "{:,}원"),
-                   num(r["est_margin_pct"], "{:.0f}%"), cell(r)] for r in rows])
+                   margin(r), cell(r)] for r in rows])
 
 
 def costing_pinned(rep):
@@ -1320,12 +1352,12 @@ function show() {
     target = document.getElementById("prod-" + m[1]);
     var page = target && target.closest(".page");
     id = page ? page.id.slice(2) : "home";
-  } else if (/^ps-\\d+$/.test(id)) {          // #ps-12 → 5번 페이지의 그 공급처 (접힌 '다른 후보' 안이면 펼침)
+  } else if (/^(ps|cost)-\\d+$/.test(id)) {   // #ps-12 → 5번 페이지의 그 공급처 (접힌 '다른 후보' 안이면 펼침) · #cost-36 → 4번 표의 그 품목
     target = document.getElementById(id);
     var pg = target && target.closest(".page");
     var fold = target && target.closest("details.more");
     if (fold) fold.open = true;
-    id = pg ? pg.id.slice(2) : "a5";          // 5번에 그 공급처 칸이 없으면(협상 전 등) 5번 페이지로
+    id = pg ? pg.id.slice(2) : (id.indexOf("cost-") === 0 ? "a4" : "a5");   // 그 칸이 없으면(협상 전·원가 결과 없음) 그 페이지로
   }
   var found = false;
   document.querySelectorAll(".page").forEach(function (p) { var on = p.id === "p-" + id; p.hidden = !on; found = found || on; });
@@ -1387,6 +1419,10 @@ document.addEventListener("click", function (ev) {
     var who = b.dataset.id ? "#" + b.dataset.id + " " + b.dataset.name : "공급처 발굴·협상 단계 품목 전체";
     if (!confirm(who + "\\n3번 통관·규제 점검을 다시 할까요? [" + ol + "] (품목당 30초~1분 · LLM API 비용)")) return;
     startJob("/api/compliance", b.dataset.id ? {product_id: Number(b.dataset.id), official: official} : {official: official});
+  } else if (b.dataset.act === "costing") {
+    if (!confirm("#" + b.dataset.id + " " + b.dataset.name + "\\n원가를 4번으로 다시 계산할까요? " +
+                 "(가격 있는 공급처 줄 전부 · LLM 비용 없음 · 결과는 4번 '공급처별 원가·마진')")) return;
+    startJob("/api/costing", {product_id: Number(b.dataset.id)});
   } else if (b.dataset.act === "costneg") {
     if (!confirm(b.dataset.name + "\\n이 공급처 기준 목표가·상한가를 5번 협상 에이전트에 넣을까요?\\n" +
                  "(5번에 직접 넣어 둔 값도 바뀌고, 이후 자동 갱신도 이 공급처 기준. 메일은 보내지 않음)")) return;
