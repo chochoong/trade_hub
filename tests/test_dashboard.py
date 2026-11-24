@@ -365,6 +365,29 @@ def test_costing_page_links_supplier_report(conn, tmp_path):
     assert f"hub_{pid}_ps{ps}_report.html" in html and "<a href=" in html
 
 
+def test_costing_page_shows_supplier_and_listing_links(conn):
+    with conn:
+        pid = db.upsert_product(conn, "키링", stage="sourcing")
+        sid = db.upsert_supplier(conn, "Koi ZH Store", "China", url="https://koi.aliexpress.com/store/1")
+        ps = db.link_supplier(conn, pid, sid, unit_price_usd=1.6, is_top_pick=1,
+                              evidence_json=[{"claim": "x", "url": "https://koi.aliexpress.com/store/1"},
+                                        {"claim": "판매가", "url": "https://www.aliexpress.com/item/1.html"}])
+        conn.execute("UPDATE product_suppliers SET est_landed_krw = 3000, est_margin_pct = -80 WHERE id = ?", (ps,))
+    html = dashboard.costing_rows(conn)
+    assert 'href="https://koi.aliexpress.com/store/1"' in html and "업체 페이지 ↗" in html
+    assert 'href="https://www.aliexpress.com/item/1.html"' in html and "판매 페이지 ↗" in html
+    assert "추천" in html and "China" in html
+    with conn:
+        conn.execute("UPDATE product_suppliers SET trade_terms_json = ? WHERE id = ?",
+                     ('{"price_basis": {"variant": "4구 LED형", "kind": "retail", "includes_shipping": true}}', ps))
+    html = dashboard.costing_rows(conn)
+    assert "4구 LED형 · 소매가 · 배송비 포함" in html
+    assert "변형 혼합" not in html
+    with conn:
+        conn.execute("UPDATE products SET notes = '[변형 혼합] #66·#67로 나눔' WHERE id = ?", (pid,))
+    assert "-80% 변형 혼합" in dashboard.costing_rows(conn)
+
+
 def test_pending_task_text_ending_with_path_not_treated_as_path(conn, tmp_path):
     rep = tmp_path / "broker_request.html"
     rep.write_text("x", encoding="utf-8")
@@ -463,3 +486,14 @@ def test_progress_cards_show_demand_trend(conn):
     assert dashboard.demand_tag(conn, b) == ""                                       # 값 없으면 표시 안 함
     html, _ = dashboard.products_in_progress(conn)
     assert html.count("trend-tag") == 1
+
+
+def test_supplier_table_wider_score_and_price(conn):
+    with conn:
+        pid = db.upsert_product(conn, "LED 조명", stage="sourcing")
+        sid = db.upsert_supplier(conn, "Allwin", "China")
+        db.link_supplier(conn, pid, sid, price_note="USD 0.53-0.79 — 4구 LED형 (변형 이름이 길어도 보임)")
+    html, _ = dashboard.products_in_progress(conn)
+    assert '<table class="tight sup">' in html and "4구 LED형 (변형 이름이" in html
+    assert dashboard.SUPPLIER_HEADS[2] == "신뢰도·점수" and dashboard.SUPPLIER_HEADS[5] == "단가"   # nth-child(3)·(6)
+    assert "table.sup td:nth-child(3)" in dashboard.CSS and "table.sup td:nth-child(6)" in dashboard.CSS

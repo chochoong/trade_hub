@@ -466,8 +466,8 @@ def supplier_row(s, report_html, ranks):
         f'{" · " + num(s["years_in_business"], "{:g}년") if s["years_in_business"] else ""}'
         f'{" · " + site if site else ""}</div>{badge}</div></div>',
         f'<span class="trust t{e(s["trust"])}">{e(s["trust"] or "–")}</span> <span class="small">{e(supplier_score(s))}</span>'
-        + (f'<div class="small">{clip(reason, 40)}</div>' if reason else ""),
-        e(s["status"]), f'{moq_badge(s)}<div>{clip(s["moq"], 30)}</div>', clip(s["price_note"] or num(s["unit_price_usd"], "${:g}"), 30),
+        + (f'<div class="small">{clip(reason, 60)}</div>' if reason else ""),
+        e(s["status"]), f'{moq_badge(s)}<div>{clip(s["moq"], 30)}</div>', clip(s["price_note"] or num(s["unit_price_usd"], "${:g}"), 50),
         contact or '<span class="muted">–</span>',
         clip(s["red_flags"], 50),
     ]
@@ -498,7 +498,7 @@ def products_in_progress(conn):
             blocks.append(f"""<div class="ps-group"><h3 class="ps-mode">{e(label)} <span class="muted small">{len(rows)}곳</span>
     <span class="small">{rep}</span></h3>
   {channel_strip(conn, p["id"], mode)}
-  {table(SUPPLIER_HEADS, rows, "tight")}</div>""")
+  {table(SUPPLIER_HEADS, rows, "tight sup")}</div>""")
         if not blocks:                            # 공급처가 아직 없음 → 사이트 순위만 (있으면)
             blocks.append(channel_strip(conn, p["id"]) + table(SUPPLIER_HEADS, [], "tight"))
         last = conn.execute("SELECT note, at FROM product_events WHERE product_id = ? ORDER BY id DESC LIMIT 1",
@@ -641,6 +641,8 @@ section{background:var(--card);border:1px solid var(--line);border-radius:12px;p
 table{border-collapse:collapse;width:100%}th,td{padding:7px 8px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
 th{font-size:12px;color:var(--muted);font-weight:600;white-space:nowrap}tr:last-child td{border-bottom:0}
 table.tight td{padding:6px 8px}
+table.sup td:nth-child(3),table.sup th:nth-child(3){min-width:200px}   /* 2번 공급처 표: 신뢰도·점수 */
+table.sup td:nth-child(6),table.sup th:nth-child(6){min-width:140px}   /* 단가 (price_note 변형 이름까지) */
 .score{font-size:16px;color:var(--accent)}.up{color:var(--ok)}.down{color:var(--bad)}
 .ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}
 .pri{display:inline-block;width:20px;height:20px;border-radius:50%;text-align:center;font-size:12px;line-height:20px;color:#fff}
@@ -958,9 +960,20 @@ def costing_report_dir(conn):
     return Path(r["report_dir"]).parent.parent if r else None
 
 
+def mixed_variant(notes):
+    """1번이 판매가가 다른 변형을 새 품목으로 나눈 원래 품목 (notes 줄 머리 '[변형 혼합]', 또는 예전 문구).
+    cost_agent/cost_agent/hub.py mixed_variant 와 같은 규칙 — 바꾸면 같이 바꿀 것."""
+    text = notes or ""
+    return "변형이 섞여 있어 나눔" in text or any(l.strip().startswith("[변형 혼합]") for l in text.splitlines())
+
+
+COST_KIND = {"factory": "공장가", "wholesale": "도매가", "retail": "소매가", "resale": "리셀가"}
+
+
 def costing_rows(conn):
     rows = conn.execute("""SELECT p.id, p.name, s.company, ps.id AS ps_id, ps.unit_price_usd, ps.est_landed_krw,
-                                  ps.est_margin_pct, p.est_retail_krw
+                                  ps.est_margin_pct, p.est_retail_krw, s.country, s.url, ps.evidence_json,
+                                  ps.is_top_pick, ps.status, ps.trade_terms_json, p.notes AS product_notes
                            FROM product_suppliers ps JOIN products p ON p.id = ps.product_id JOIN suppliers s ON s.id = ps.supplier_id
                            WHERE ps.est_landed_krw IS NOT NULL
                            ORDER BY MAX(ps.est_margin_pct) OVER (PARTITION BY p.id) DESC NULLS LAST, p.id,
@@ -983,7 +996,35 @@ def costing_rows(conn):
     def margin(r):
         if r["est_margin_pct"] is None and r["est_retail_krw"] is None:
             return '<span class="muted" title="품목 판매가(est_retail_krw)가 없어 마진을 계산하지 못함">판매가 없음</span>'
+        if mixed_variant(r["product_notes"]):
+            return (f'<span class="muted" title="판매가가 여러 변형을 섞은 값 (1번이 품목을 나눔) — 참고용, 보류·5번 반영 안 함">'
+                    f'{num(r["est_margin_pct"], "{:.0f}%")} 변형 혼합</span>')
         return num(r["est_margin_pct"], "{:.0f}%")
+
+    def supplier(r):                # 업체 페이지(suppliers.url) + 판매 페이지(2번 근거 중 첫 다른 주소) — 2번 페이지와 같은 링크
+        links = [web_link(r["url"], "업체 페이지 ↗")]
+        try:
+            ev = json.loads(r["evidence_json"] or "[]")
+        except ValueError:
+            ev = []
+        item = next((x.get("url") for x in ev if isinstance(x, dict) and isinstance(x.get("url"), str)
+                     and x["url"].lower().startswith(("http://", "https://")) and x["url"] != r["url"]), None)
+        links.append(web_link(item, "판매 페이지 ↗"))
+        tags = ('<span class="pick">추천</span> ' if r["is_top_pick"] else "") + (
+            ' <span class="ok small">선정</span>' if r["status"] == "selected" else "")
+        sub = " · ".join(x for x in [e(r["country"]) if r["country"] else ""] + links if x)
+        try:                        # 2번 price_basis: 이 단가가 가리키는 상품·가격 종류 (같은 품목 안 비교용)
+            pb = (json.loads(r["trade_terms_json"] or "{}") or {}).get("price_basis")
+        except (ValueError, AttributeError):
+            pb = None
+        basis = ""
+        if isinstance(pb, dict):
+            bits = [clip(pb["variant"], 40) if isinstance(pb.get("variant"), str) and pb["variant"].strip() else "",
+                    e(COST_KIND.get(pb.get("kind"), "")), "배송비 포함" if pb.get("includes_shipping") is True else "",
+                    "사전예약" if pb.get("preorder") is True else ""]
+            basis = " · ".join(b for b in bits if b)
+        return (f'{tags}{e(r["company"])}' + (f'<div class="muted small">{sub}</div>' if sub else "")
+                + (f'<div class="small">{basis}</div>' if basis else ""))
 
     seen = set()
 
@@ -993,7 +1034,7 @@ def costing_rows(conn):
         return f'{anchor}#{r["id"]} {e(r["name"])}'
 
     return table(["품목", "공급처", "FOB", "개당 원가", "판매가", "마진", "보고서"],
-                 [[name(r), e(r["company"]), num(r["unit_price_usd"], "${:g}"),
+                 [[name(r), supplier(r), num(r["unit_price_usd"], "${:g}"),
                    num(r["est_landed_krw"], "{:,}원"), num(r["est_retail_krw"], "{:,}원"),
                    margin(r), cell(r)] for r in rows])
 
