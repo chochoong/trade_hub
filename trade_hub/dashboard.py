@@ -357,6 +357,34 @@ def product_index(conn):
             .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"))
 
 
+# "새 결과 있음" 띠: 화면 밖(슈퍼바이저·명령줄·buyagent 정기 감시)에서 바뀐 것을 알리는 표시 — 화면은 다시 그리지 않음.
+# 에이전트별 마지막 끝난 실행 + 사람이 바꾸는 표의 최근 값 + buyagent 최근 감시 결과 파일 시각
+CHANGE_COLUMNS = (("products", "updated_at"), ("product_suppliers", "updated_at"), ("suppliers", "updated_at"),
+                  ("compliance_checks", "id"), ("quotes", "id"), ("messages", "id"), ("messages", "sent_at"),
+                  ("tasks", "id"), ("tasks", "done_at"))
+
+
+def change_sig(conn):
+    """GET /api/changed 값. {"runs": {에이전트: "마지막 실행 번호|끝난 시각"}, "data": "...", "buy": 파일 시각}"""
+    runs = {r[0]: f"{r[1]}|{r[2]}" for r in conn.execute(
+        "SELECT agent, MAX(id), MAX(finished_at) FROM agent_runs WHERE finished_at IS NOT NULL"
+        " AND agent != 'supervisor' GROUP BY agent")}   # 슈퍼바이저 tick 자체는 결과가 아님 (돌린 에이전트가 따로 기록됨)
+    data = "|".join(str(conn.execute(f"SELECT MAX({col}) FROM {t}").fetchone()[0]) for t, col in CHANGE_COLUMNS)
+    try:
+        buy = int((buying.buyagent_dir() / "reports" / "latest.json").stat().st_mtime)
+    except OSError:
+        buy = 0
+    return {"runs": runs, "data": data, "buy": buy}
+
+
+def change_sig_json(conn):
+    """페이지에 심는 값 (그릴 때의 change_sig + 에이전트 이름). <script> 안이라 <, >, & 이스케이프"""
+    labels = {a: f"{no}번 {name.split('·')[0]}" for a, no, name, _ in AGENT_PAGES}
+    labels["buyagent"] = "구매대행"
+    return (json.dumps({**change_sig(conn), "labels": labels}, ensure_ascii=False)
+            .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"))
+
+
 # 공급처 목록을 나눌 구매 방식 (product_suppliers.purchase_mode). 대시보드 버튼은 retail·small_batch만 실행
 PURCHASE_GROUPS = [("retail", "구매대행"), ("small_batch", "소량 사입"), ("oem", "대량 사입·OEM"), (None, "구매 방식 미기록")]
 SUPPLIER_HEADS = ["", "공급처", "신뢰도·점수", "상태", "MOQ", "단가", "연락처", "위험 요소"]
@@ -550,6 +578,9 @@ color:var(--fg);cursor:pointer;white-space:nowrap}.btn:hover{border-color:var(--
 .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}.acts{display:flex;flex-direction:column;gap:4px}
 @keyframes flash{from{background:var(--accent-soft)}to{background:transparent}}
 .flash,.flash td{animation:flash 2.5s ease-out}
+.changed{position:fixed;top:8px;left:50%;transform:translateX(-50%);z-index:30;max-width:calc(100vw - 32px);
+  padding:8px 14px;border-radius:999px;border:1px solid var(--line);background:var(--bg);box-shadow:0 2px 10px rgba(0,0,0,.18);
+  cursor:pointer;font-weight:600}
 .jobs{position:fixed;right:16px;bottom:16px;z-index:20;width:min(460px,calc(100vw - 32px));max-height:60vh;overflow:auto;
 background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.2);padding:8px 12px}
 .job{position:relative;padding:6px 26px 6px 0;border-bottom:1px solid var(--line)}.job:last-child{border-bottom:0}
@@ -1530,6 +1561,31 @@ document.addEventListener("submit", function (ev) {   // 5번 협상 폼 → /ap
   if (ask && !confirm(ask)) return;
   startJob("/api/neg", body);
 });
+// "새 결과 있음" 띠: 30초마다 /api/changed 와 그릴 때 값(hub-sig)을 비교. 자동으로 다시 읽지 않음 (입력 중인 폼 보호)
+// 이 서버의 작업이 실행 중이거나 내가 시작한 작업이 끝나 곧 다시 읽을 때 · 탭이 뒤에 있을 때는 확인하지 않음
+var SIG = JSON.parse(document.getElementById("hub-sig").textContent), changedBar = document.getElementById("changed");
+function sigDiff(a, b) {
+  var out = [], ra = a.runs || {}, rb = b.runs || {}, keys = {};
+  Object.keys(ra).concat(Object.keys(rb)).forEach(function (k) { keys[k] = 1; });
+  Object.keys(keys).forEach(function (k) {
+    var n = SIG.labels[k] || k;
+    if (ra[k] !== rb[k] && out.indexOf(n) < 0) out.push(n);
+  });
+  if (a.buy !== b.buy && out.indexOf("구매대행") < 0) out.push("구매대행");
+  if (!out.length && a.data !== b.data) out.push("데이터");
+  return out;
+}
+function checkChanged() {
+  if (document.hidden || Object.keys(mine).length || lastJobs.some(function (j) { return j.status === "running"; })) return;
+  api("/api/changed").then(function (now) {
+    var d = sigDiff(SIG, now);
+    changedBar.hidden = !d.length;
+    if (d.length) changedBar.textContent = "🔔 새 결과가 있습니다 — " + d.join("·") + " 업데이트 · 눌러서 새로고침";
+  }).catch(function () {});
+}
+setInterval(checkChanged, 30000);
+document.addEventListener("visibilitychange", function () { if (!document.hidden) checkChanged(); });
+changedBar.addEventListener("click", function () { location.reload(); });   // 주소(#위치)는 그대로
 function jobTarget(j) { return j.anchor ? "#" + j.anchor : (j.product_id ? "#p" + j.product_id : ""); }
 var timer = null;
 function poll() {
@@ -1622,6 +1678,7 @@ def _render(conn, server):
 </div></div>
 <main>{"".join(pages)}</main>
 <div id="jobs" class="jobs" hidden></div>
+{f'<button type="button" id="changed" class="changed" hidden></button><script type="application/json" id="hub-sig">{change_sig_json(conn)}</script>' if server else ""}
 <script type="application/json" id="prod-index">{product_index(conn)}</script>
 <script>{SERVER_JS if server else "function startJob() {{}}"}{SEARCH_JS}</script>
 </body></html>"""

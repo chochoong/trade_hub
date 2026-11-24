@@ -779,6 +779,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, page, "text/html; charset=utf-8")
             if url.path == "/api/search":
                 return self._send(200, search(conn, (qs.get("q") or [""])[0]))
+            if url.path == "/api/changed":      # "새 결과 있음" 띠용 — 화면을 그리지 않고 바뀜 표시만
+                return self._send(200, dashboard.change_sig(conn))
             if url.path == "/api/jobs":
                 with LOCK:
                     jobs = [job_view(j) for j in sorted(JOBS.values(), key=lambda j: j["started"], reverse=True)[:8]]

@@ -559,3 +559,32 @@ def test_costing_route_validates_and_runs(srv, conn, monkeypatch):
     assert call(srv + "/api/costing", {"product_id": bare})[0] == 400
     assert call(srv + "/api/costing", {"product_id": "x"})[0] == 400
     assert call(srv + "/api/costing", {"product_id": 9999})[0] == 404
+
+
+# --- "새 결과 있음" 띠 ------------------------------------------------------------------
+def test_changed_endpoint_moves_when_db_changes_outside_screen(srv, conn):
+    code, a = call(srv + "/api/changed")
+    assert code == 200 and set(a) == {"runs", "data", "buy"}
+    with db.agent_run(conn, "costing"):            # 명령줄·슈퍼바이저 실행 (화면 작업 아님)
+        pass
+    b = call(srv + "/api/changed")[1]
+    assert b["runs"].get("costing") and b["runs"] != a["runs"]
+    with db.agent_run(conn, "supervisor"):
+        pass
+    assert call(srv + "/api/changed")[1]["runs"] == b["runs"]          # 슈퍼바이저 tick만으로는 안 바뀜
+    with conn:
+        db.upsert_product(conn, "사람이 추가", stage="candidate")
+    c = call(srv + "/api/changed")[1]
+    assert c["data"] != b["data"] and c["runs"] == b["runs"]
+    page = urllib.request.urlopen(srv + "/").read().decode("utf-8")
+    assert 'id="hub-sig"' in page and 'id="changed"' in page and '"costing": "4번 원가"' in page
+
+
+def test_changed_bar_js_rules(conn):
+    from trade_hub import dashboard
+    js = dashboard.SERVER_JS
+    assert "setInterval(checkChanged, 30000)" in js and "location.reload()" in js
+    check = js[js.index("function checkChanged"):js.index("setInterval(checkChanged")]
+    assert "document.hidden" in check and "Object.keys(mine).length" in check and '"running"' in check
+    assert "visibilitychange" in js
+    assert 'id="hub-sig"' not in dashboard.render(conn)                          # 파일 대시보드엔 없음
