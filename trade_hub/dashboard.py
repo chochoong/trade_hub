@@ -1333,7 +1333,10 @@ function show() {
   document.querySelectorAll(".pipe-nav a").forEach(function (a) { a.classList.toggle("cur", a.getAttribute("href") === "#" + id); });
   if (target) {
     var row = target.closest("tr") || target;
-    row.scrollIntoView({block: "center"});
+    // 화면보다 긴 카드(조사를 여러 번 한 품목 등)는 가운데가 아니라 제목이 보이게 맨 위로 · 위 고정 메뉴에 안 가리게
+    var bar = document.querySelector(".top");
+    row.style.scrollMarginTop = ((bar ? bar.offsetHeight : 0) + 8) + "px";
+    row.scrollIntoView({block: row.offsetHeight > innerHeight * 0.8 ? "start" : "center"});
     row.classList.remove("flash"); void row.offsetWidth; row.classList.add("flash");
   } else { window.scrollTo(0, 0); }
 }

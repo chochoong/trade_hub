@@ -400,3 +400,9 @@ def test_result_link_scroll_not_undone_after_reload():
     js = dashboard.SEARCH_JS
     assert js.index('history.scrollRestoration = "manual"') < js.index("show();")   # 새로 고침 뒤 예전 위치로 안 되돌림
     assert 'window.addEventListener("load", function () { if (location.hash) show(); });' in js
+
+
+def test_long_card_scrolls_to_title_below_sticky_bar():
+    js = dashboard.SEARCH_JS
+    assert 'row.scrollIntoView({block: row.offsetHeight > innerHeight * 0.8 ? "start" : "center"});' in js
+    assert 'row.style.scrollMarginTop' in js and 'document.querySelector(".top")' in js
