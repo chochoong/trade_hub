@@ -741,6 +741,27 @@ def compliance_verdict(c):
             + f'<div class="small muted">{e(c["checked_on"])}{" · LLM 분류" if c["used_llm"] else ""}{report}</div>')
 
 
+def duty_cell(r, c):
+    """관세율 칸: 관세사가 확인한 products.duty_rate가 있으면 그 값, 없으면 3번 참고값(duty_estimate_json, v17)."""
+    if r["duty_rate"] is not None:
+        return f'{r["duty_rate"] * 100:g}% <span class="small muted">확정</span>'
+    est = {}
+    if c is not None and "duty_estimate_json" in c.keys() and c["duty_estimate_json"]:
+        try:
+            est = json.loads(c["duty_estimate_json"])
+        except ValueError:
+            est = {}
+    g = est.get("general_pct") if isinstance(est, dict) else None
+    if not isinstance(g, (int, float)):
+        return "–"
+    f = est.get("fta_pct")
+    tip = " · ".join(str(x) for x in (est.get("basis"), est.get("fta_name"), est.get("origin") and f'원산지 {est["origin"]}',
+                                      est.get("checked_on") and f'{est["checked_on"]} 조회') if x)
+    tip = (tip + " · " if tip else "") + "관세사 확인값 아님" + ("" if est.get("complete", True) else " · 후보 일부만 조회됨")
+    return (f'<span title="{e(tip)}">참고 {g:g}%' + (f' (FTA {f:g}%)' if isinstance(f, (int, float)) else "")
+            + ("" if est.get("complete", True) else "?") + '</span>')
+
+
 def _ps_brief(conn, ps_id):
     return conn.execute("""SELECT ps.id, s.company, ps.status, ps.supplier_specs_json FROM product_suppliers ps
                            JOIN suppliers s ON s.id = ps.supplier_id WHERE ps.id = ?""", (ps_id,)).fetchone()
@@ -810,7 +831,7 @@ def compliance_rows(conn):
         out.append([f'#{r["id"]} {e(r["name"])}', e(STAGE_LABEL.get(r["stage"], r["stage"])),
                     compliance_verdict(c) + basis_line(conn, r["id"], c),
                     clip(" · ".join(certs), 80) if certs else ('<span class="muted">없음</span>' if c else "–"),
-                    hs_cell, "–" if r["duty_rate"] is None else f'{r["duty_rate"] * 100:g}%', clip(r["fta_note"], 40),
+                    hs_cell, duty_cell(r, c), clip(r["fta_note"], 40),
                     clip(r["regulations"], 70)]
                    + ([f'<button type="button" class="btn" data-act="compliance" data-id="{r["id"]}" data-name="{e(r["name"])}">'
                        f'{"다시 점검" if c else "점검"}</button>'] if SERVER["on"] else []))

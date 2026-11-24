@@ -26,7 +26,7 @@ from pathlib import Path
 
 PKG_DIR = Path(__file__).resolve().parent
 SCHEMA_PATH = PKG_DIR / "schema.sql"
-SCHEMA_VERSION = 16  # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
+SCHEMA_VERSION = 17  # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
 # 버전별로 추가된 컬럼: 예전 DB에는 connect() 때 ALTER TABLE로 붙인다 (새 DB는 schema.sql에 이미 있음)
 
 
@@ -61,6 +61,7 @@ MIGRATIONS = {
     15: [("messages", "followup_due_on", "TEXT")],   # 캘린더에서 옮긴 후속 메일 예정일 (calendar_sync가 씀, 5번 FOLLOWUP_DUE_SQL이 따름)
     16: [("compliance_checks", "basis_ps_id",        # 3번 판정에 쓴 대표 공급처 줄 (공급처 선정이 바뀌면 다시 점검)
           "INTEGER REFERENCES product_suppliers(id) ON DELETE SET NULL")],
+    17: [("compliance_checks", "duty_estimate_json", _json_col("duty_estimate_json"))],   # 3번 HS 후보 관세율 참고값 (관세사 확인값 아님)
 }
 PS_UNIQUE_INDEX = ("CREATE UNIQUE INDEX IF NOT EXISTS ux_ps_product_supplier_mode "
                    "ON product_suppliers(product_id, supplier_id, COALESCE(purchase_mode, ''))")
@@ -332,7 +333,8 @@ def latest_channels(conn, product_id, purchase_mode=None):
 COMPLIANCE_VERDICTS = {"go": "진행", "conditional": "조건부 진행", "hold": "보류"}
 COMPLIANCE_LIST_FIELDS = ("verdict_reasons", "hs_candidates", "required_certs", "possible_rules", "factory_requests",
                           "labeling", "contract_clauses", "broker_questions", "unknown_flags", "warnings",
-                          "supplier_questions")   # v14: [{"flag", "question_ko"}] — 5번이 공급처에게 물음
+                          "supplier_questions",   # v14: [{"flag", "question_ko"}] — 5번이 공급처에게 물음
+                          "duty_estimate")        # v17: {"general_pct", "fta_pct", ...} 관세율 참고값 (dict, 못 찾으면 None)
 
 
 # 3번이 판정에 쓰는 대표 공급처 줄: 선정 > 추천(top pick) > 점수 > id, 제외(rejected) 빼고.

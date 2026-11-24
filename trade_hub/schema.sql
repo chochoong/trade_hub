@@ -64,7 +64,8 @@ CREATE TABLE IF NOT EXISTS products (
     regulations        TEXT,                  -- 필요 인증·규제
     risk               TEXT,
     hs_code            TEXT,
-    duty_rate          REAL CHECK (duty_rate IS NULL OR duty_rate BETWEEN 0 AND 1),
+    duty_rate          REAL CHECK (duty_rate IS NULL OR duty_rate BETWEEN 0 AND 1),   -- 관세사가 확인한 세율만 (사람 입력)
+                                              --   3번이 조회한 참고 세율은 compliance_checks.duty_estimate_json (여기에 넣지 않음)
     fta_note           TEXT,
     est_retail_krw     INTEGER,               -- 국내 판매가 추정
     est_shipping_usd   REAL,                  -- 개당 국제운송비 추정
@@ -383,6 +384,10 @@ CREATE TABLE IF NOT EXISTS compliance_checks (
                                                   --   [{"flag": "chemical_product", "question_ko": "..."}] — '모름'으로 남은 사실 항목만 (정책 항목 제외)
     basis_ps_id            INTEGER REFERENCES product_suppliers(id) ON DELETE SET NULL,  -- 판정에 쓴 대표 공급처 줄 [v16]
                                                   --   (db.BASIS_PS_SQL 순서: 선정 > 추천 > 점수) — 지금 대표와 다르면 다시 점검 대상
+    duty_estimate_json     TEXT CHECK (duty_estimate_json IS NULL OR json_valid(duty_estimate_json)),  -- HS 후보로 조회한 관세율 참고값 [v17]
+                                                  --   {"general_pct": 8.0, "fta_pct": 0.0, "fta_name": "한-중 FTA", "origin": "CN", "complete": true,
+                                                  --    "checked_on": "YYYY-MM-DD", "basis": "...", "candidates": [...]} — 하나도 못 찾으면 NULL
+                                                  --   관세사 확인값 아님 (확정 세율은 products.duty_rate에 사람이 입력)
     used_llm               INTEGER NOT NULL DEFAULT 0 CHECK (used_llm IN (0, 1)),                             -- LLM 분류로 플래그·HS 후보를 채웠는가
     report_path            TEXT,                  -- 사람이 읽는 보고서(.md) 경로
     checked_on             TEXT NOT NULL,         -- 판정 기준일 (YYYY-MM-DD)
