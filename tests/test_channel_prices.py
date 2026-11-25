@@ -37,10 +37,10 @@ def test_supplier_table_channel_prices(conn, monkeypatch):
         "nl": FakeNaver, "by_hub": {pid: {"id": "shelf", "name": "벽선반", "naver_keyword": "무타공 선반"}},
         "lows": {"shelf": {"price": 10000}}, "days": 30})
     html, _ = dashboard.products_in_progress(conn)
-    assert "<th>쿠팡 권장가</th><th>스마트스토어 권장가</th>" in html
-    assert ">11,900원</b>" in html and ">11,200원</b>" in html and "원가 5,230원 · 100개 기준" in html
-    assert "최소 마진 판매가 9,800원" in html and "시장 가격 아님" in html
-    assert "1번 판매가보다 " in html and "15% 낮음" in html                        # 11,900 vs 13,980
+    assert "<th>단가</th><th>스마트스토어 권장가</th><th>연락처</th>" in html and "쿠팡 권장가" not in html
+    assert ">11,900원</b>" not in html and ">11,200원</b>" in html and "원가 5,230원 · 100개 기준" in html
+    assert "최소 마진 판매가 9,300원" in html and "시장 가격 아님" in html
+    assert "1번 판매가보다 " in html and "20% 낮음" in html                        # 11,200 vs 13,980
     assert "query=무타공 선반" in html and "네이버 최저가 10,000원" in html and "권장가가 12% 높음" in html
     assert "query=키캡" in html                                                   # buyagent에 없는 품목: 품목 검색어로 링크만
     assert '<span class="muted" title="4번 원가 계산 전">–</span>' in html
@@ -66,4 +66,4 @@ def test_channel_dash_reasons():
     p = {"id": 1, "est_retail_krw": None, "name": "x", "keywords_ko_json": None}
     assert "4번 원가 계산 전" in dashboard.channel_cells(row(None), p, {})[0]
     c = dashboard.channel_cells(row({"smartstore": {"target_krw": None, "walk_krw": None}, "qty": 5}), p, {})
-    assert "쿠팡 수수료 미설정" in c[0] and "100% 이상" in c[1]
+    assert len(c) == 1 and "100% 이상" in c[0]                               # 쿠팡 칸은 뺌

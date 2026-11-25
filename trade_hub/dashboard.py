@@ -453,8 +453,8 @@ def change_sig_json(conn):
 
 # 공급처 목록을 나눌 구매 방식 (product_suppliers.purchase_mode). 대시보드 버튼은 retail·small_batch만 실행
 PURCHASE_GROUPS = [("retail", "구매대행"), ("small_batch", "소량 사입"), ("oem", "대량 사입·OEM"), (None, "구매 방식 미기록")]
-SUPPLIER_HEADS = ["", "공급처", "신뢰도·점수", "상태", "MOQ", "단가", "쿠팡 권장가", "스마트스토어 권장가", "연락처", "위험 요소"]
-CHANNEL_COLS = (("coupang", "쿠팡"), ("smartstore", "스마트스토어"))   # product_suppliers.channel_prices_json 키 (4번이 씀)
+SUPPLIER_HEADS = ["", "공급처", "신뢰도·점수", "상태", "MOQ", "단가", "스마트스토어 권장가", "연락처", "위험 요소"]
+CHANNEL_COLS = (("smartstore", "스마트스토어"),)   # product_suppliers.channel_prices_json 키 (4번이 씀) — 쿠팡은 카테고리별 수수료라 뺌 (형식엔 남아 있음)
 
 
 def naver_context():
@@ -482,7 +482,7 @@ def _naver_kw(p):
 
 
 def channel_cells(s, p, ctx):
-    """공급처 줄의 쿠팡·스마트스토어 권장가 (4번 channel_prices_json — 원가 기준 계산값, 시장 가격 아님).
+    """공급처 줄의 마켓별 권장가 (CHANNEL_COLS) (4번 channel_prices_json — 원가 기준 계산값, 시장 가격 아님).
     스마트스토어 칸 아래 네이버 최저가 링크 + (buyagent에 사람이 적은 최저가가 있으면) 권장가 비교."""
     try:
         cp = json.loads(_field(s, "channel_prices_json") or "null")
@@ -576,7 +576,7 @@ def supplier_row(s, report_html, ranks, latest_run=None, p=None, ctx=None):
         f'<span class="trust t{e(s["trust"])}">{e(s["trust"] or "–")}</span> <span class="small">{e(supplier_score(s))}</span>'
         + (f'<div class="small">{clip(reason, 60)}</div>' if reason else "") + seen,
         e(s["status"]), f'{moq_badge(s)}<div>{clip(s["moq"], 30)}</div>', clip(s["price_note"] or num(s["unit_price_usd"], "${:g}"), 50),
-        *(channel_cells(s, p, ctx or {}) if p is not None else ["", ""]),
+        *(channel_cells(s, p, ctx or {}) if p is not None else [""] * len(CHANNEL_COLS)),
         contact or '<span class="muted">–</span>',
         clip(s["red_flags"], 50),
     ]
@@ -759,7 +759,7 @@ th{font-size:12px;color:var(--muted);font-weight:600;white-space:nowrap}tr:last-
 table.tight td{padding:6px 8px}
 table.sup td:nth-child(3),table.sup th:nth-child(3){min-width:200px}   /* 2번 공급처 표: 신뢰도·점수 */
 table.sup td:nth-child(6),table.sup th:nth-child(6){min-width:140px}
-table.sup td:nth-child(7),table.sup th:nth-child(7),table.sup td:nth-child(8),table.sup th:nth-child(8){min-width:130px}   /* 단가 (price_note 변형 이름까지) */
+table.sup td:nth-child(7),table.sup th:nth-child(7){min-width:130px}   /* 스마트스토어 권장가 */   /* 단가 (price_note 변형 이름까지) */
 .score{font-size:16px;color:var(--accent)}.up{color:var(--ok)}.down{color:var(--bad)}
 .ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}
 .pri{display:inline-block;width:20px;height:20px;border-radius:50%;text-align:center;font-size:12px;line-height:20px;color:#fff}
