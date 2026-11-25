@@ -496,7 +496,7 @@ def qty_block(cp):
     if "best_qty" not in cp and "by_qty" not in cp:
         return ""
     price, cap = cp.get("price_krw"), cp.get("max_cash_krw")
-    basis = (f"판매가 {_won(price)}(1번 예상 판매가) 기준 · 부가세 제외 · 필요 자금은 수입 부가세 포함"
+    basis = (f"판매가 {_won(price)}(1번 예상 판매가, 부가세 포함) 기준 · 이익·원가는 부가세 제외 · 자금엔 수입 부가세 포함"
              + (f" · 자금 한도 {_man(cap)}" if isinstance(cap, (int, float)) else ""))
     best, out = cp.get("best_qty"), ""
     if isinstance(best, dict):
@@ -552,7 +552,7 @@ def channel_cells(s, p, ctx):
                    "수수료+광고+마진이 100% 이상이라 판매가를 계산할 수 없음")
             cell = f'<span class="muted" title="{e(why)}">–</span>'
         else:
-            tip = f"{label} 목표 마진 판매가 (4번 계산값 · 시장 가격 아님)" + (
+            tip = f"{label} 목표 마진 판매가 (부가세 포함 · 4번 계산값 · 시장 가격 아님)" + (
                 f" · 최소 마진 판매가 {w:,.0f}원" if isinstance(w, (int, float)) else "") + (
                 f" · 계산 {str(cp.get('updated_at'))[:16]}" if cp.get("updated_at") else "")
             cell = f'<b title="{e(tip)}">{t:,.0f}원</b>'

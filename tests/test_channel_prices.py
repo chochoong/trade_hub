@@ -77,7 +77,7 @@ def test_best_qty_block():
     h = dashboard.qty_block(cp)
     assert "<b>이익 최대 200개</b> · 개당 +4,839원 · 총 +967,778원 (자금 179만원)" in h
     assert "목표 마진 25%는 120개부터" in h and "수량별 이익 (2)" in h and "<td><b>200</b></td>" in h
-    assert '<tr class="muted"><td>500</td>' in h and "판매가 20,900원(1번 예상 판매가) 기준" in h
+    assert '<tr class="muted"><td>500</td>' in h and "판매가 20,900원(1번 예상 판매가, 부가세 포함) 기준 · 이익·원가는 부가세 제외 · 자금엔 수입 부가세 포함" in h
     nop = dashboard.qty_block({**cp, "best_qty": None, "best_none_reason": "no_profit", "min_target_qty": None})
     assert '<span class="bad">어떤 수량도 손해</span>' in nop and "목표 마진" not in nop
     over = dashboard.qty_block({**cp, "best_qty": None, "best_none_reason": "over_cash"})
