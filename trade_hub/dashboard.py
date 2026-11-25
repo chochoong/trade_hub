@@ -1004,6 +1004,21 @@ DOC_STATUS = {"draft": '<span class="warn">검토 대기</span>', "approved": '<
 DOC_CHECK = {"ok": '<span class="ok">통과</span>', "warning": '<span class="warn">경고</span>', "error": '<span class="bad">오류</span>'}
 
 
+def docs_dir():
+    """6번 폴더 (supervisor.json agents.documents.cwd, 기본 ../trade_docs_agent). documents.path는 이 폴더 기준 상대경로."""
+    cfg_path = db.PKG_DIR.parent / "supervisor.json"
+    try:
+        cwd = json.loads(cfg_path.read_text(encoding="utf-8"))["agents"]["documents"]["cwd"]
+    except (OSError, ValueError, KeyError, TypeError):
+        cwd = "../trade_docs_agent"
+    return (cfg_path.parent / cwd).resolve()
+
+
+def doc_path(path):
+    p = Path(path)
+    return p if p.is_absolute() else docs_dir() / p
+
+
 def document_rows(conn):
     """6번 서류 (최신 판 위주: 이전 판은 접어 둠)."""
     rows = conn.execute("""SELECT d.*, p.name, s.company FROM documents d JOIN products p ON p.id = d.product_id
@@ -1016,7 +1031,7 @@ def document_rows(conn):
         msgs = " · ".join(str(c.get("msg")) for c in checks if isinstance(c, dict) and c.get("msg"))
         no = e(r["doc_no"]) + (f"-R{r['revision']}" if r["revision"] else "")
         out.append([f'#{r["product_id"]} {e(r["name"])}', e(r["company"] or "–"), e(DOC_KIND.get(r["kind"], r["kind"])),
-                    link(r["path"], no) if r["path"] else no,
+                    link(doc_path(r["path"]), no) if r["path"] else no,
                     num(r["qty"], "{:,}") + (f' <span class="small muted">({e(r["qty_source"])})</span>' if r["qty_source"] else ""),
                     num(r["total_usd"], "${:,.2f}"),
                     DOC_CHECK.get(r["check_result"], "–") + (f'<div class="small">{clip(msgs, 80)}</div>' if msgs else ""),

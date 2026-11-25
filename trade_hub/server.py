@@ -134,10 +134,11 @@ BUY_MARKETS = buying.BUY_MARKETS
 
 
 def allowed_roots():
-    """/file 로 보여 줄 수 있는 폴더: 확정 사진(data/images), 1번 리포트, 2번 출력, 3번 보고서, 4번 보고서.
+    """/file 로 보여 줄 수 있는 폴더: 확정 사진(data/images), 1번 리포트, 2번 출력, 3번 보고서, 4번 보고서, 6번 서류(output).
     (DB 파일·백업·.env는 제외. 서버는 127.0.0.1에만 열림)"""
     roots = [db.images_dir().resolve()]
-    for agent, sub in (("discover", "reports"), ("sourcing", "output"), ("compliance", "output"), ("costing", "output")):
+    for agent, sub in (("discover", "reports"), ("sourcing", "output"), ("compliance", "output"), ("costing", "output"),
+                       ("documents", "output")):
         try:
             roots.append((agent_spec(agent)[0] / sub).resolve())
         except Exception:

@@ -71,3 +71,22 @@ def test_v17_db_gets_documents_and_incoterm_place(tmp_path, monkeypatch):
         assert c.execute("PRAGMA user_version").fetchone()[0] == 18
     finally:
         c.close()
+
+
+def test_relative_doc_path_resolves_to_trade_docs_agent(conn, tmp_path, monkeypatch):
+    pid, ps = seed(conn)
+    monkeypatch.setattr(dashboard, "docs_dir", lambda: tmp_path)
+    f = tmp_path / "output" / "HUB-P1-S1" / "PO-HUB-P1-S1.xlsx"
+    f.parent.mkdir(parents=True)
+    f.write_bytes(b"x")
+    with conn:
+        db.add_document(conn, "po", "PO-HUB-P1-S1", pid, "output/HUB-P1-S1/PO-HUB-P1-S1.xlsx", product_supplier_id=ps)
+    html = dashboard.document_rows(conn)
+    assert "PO-HUB-P1-S1</a>" in html and "파일 없음" not in html
+    assert dashboard.doc_path("C:/abs/x.xlsx") == Path("C:/abs/x.xlsx")
+
+
+def test_docs_output_is_servable_root():
+    from trade_hub import server
+    assert server.agent_spec("documents")[0] / "output" in server.allowed_roots() or \
+        (server.agent_spec("documents")[0] / "output").resolve() in server.allowed_roots()
