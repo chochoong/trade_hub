@@ -245,6 +245,25 @@ def pending_tasks(conn):
     return table(["우선", "번호", "종류", "할 일", "자료", "생성"], out), len(rows)
 
 
+PRICE_CHECKED = re.compile(r"\[1번 시세 (\d{4}-\d{2}-\d{2})\]")   # products.notes 맨 앞 1번 태그 (앞에 '[변형 혼합] ' 가능)
+
+
+def price_checked_on(notes):
+    """1번이 국내 시세(판매가)를 다시 확인한 날 YYYY-MM-DD, 없으면 None."""
+    found = PRICE_CHECKED.findall(notes or "")
+    return max(found) if found else None
+
+
+def price_date_tag(notes):
+    d = price_checked_on(notes)
+    return f'<div class="small muted" title="1번 국내 시세 확인 {d}">시세 {d[5:]}</div>' if d else ""
+
+
+def naver_title(d):
+    """네이버 조회일 → title 속성 (없으면 빈 문자열)."""
+    return f' title="네이버 조회 {e(str(d)[:10])}"' if d else ""
+
+
 def demand_trend(nv):
     """1번 naver_json.shopping_insight(네이버 쇼핑인사이트 클릭 추세) 짧은 표기 — '수요 추세'만 (가격·판매처 아님).
     series는 키워드마다 자기 최대=100이라 품목끼리 크기 비교는 안 됨 (비교는 검색량 volume_idx)."""
@@ -266,7 +285,8 @@ def demand_trend(nv):
         text += f" · {season}"
     months, series = si.get("months") or [], si.get("series") or []
     tip = (f'네이버 쇼핑인사이트 · {si.get("category") or ""} · 「{si.get("keyword") or ""}」 클릭 추세 (최근 3개월 ÷ 그 전 3개월)\n'
-           "키워드 자기 최대=100 상대값이라 품목끼리 크기 비교는 검색량으로\n"
+           + (f'네이버 조회 {str(si["checked_at"])[:10]}\n' if si.get("checked_at") else "")
+           + "키워드 자기 최대=100 상대값이라 품목끼리 크기 비교는 검색량으로\n"
            + " ".join(f"{str(m)[2:]}:{v:g}" for m, v in zip(months, series) if isinstance(v, (int, float))))
     return f'<span class="small" title="{e(tip)}">{text}</span>'
 
@@ -287,7 +307,7 @@ def demand_tag(conn, product_id):
 def candidate_rows(conn):
     rows = conn.execute("""
         SELECT p.*, s.total, s.demand, s.margin, s.competition, s.regulation, s.logistics, s.est_fob_usd,
-               s.naver_json, s.score_notes, r.report_dir
+               s.naver_json, s.score_notes, s.created_at AS scored_at, r.report_dir
         FROM products p
         LEFT JOIN product_scores s ON s.id = (SELECT MAX(id) FROM product_scores WHERE product_id = p.id)
         LEFT JOIN agent_runs r ON r.id = s.run_id
@@ -301,12 +321,16 @@ def candidate_rows(conn):
         report = link(Path(r["report_dir"]) / "candidates.html", "점수표") if r["report_dir"] else ""
         out.append([f'<span class="anchor" id="prod-{r["id"]}"></span>#{r["id"]}'
                     + ('<div class="small muted">직접 조사</div>' if r["origin"] == "manual" else ""),
-                    f'<b class="score">{num(r["total"])}</b>',
+                    f'<b class="score">{num(r["total"])}</b>'
+                    + (f'<div class="small muted" title="1번 조사·평가일 {e(r["scored_at"][:10])}">{e(r["scored_at"][5:10])} 조사</div>'
+                       if r["scored_at"] else ""),
                     f'<div class="pcell">{photo(r)}<div>{e(r["name"])}<div class="muted small">{e(r["category"])} · {sub}</div>'
                     f'<div class="small">{search_links(r)}</div></div></div>',
-                    num(nv.get("volume_idx"), "{:g}") if nv else '<span class="muted">–</span>',
-                    pct(nv.get("growth_3m")) if nv else "", pct(nv.get("yoy")) if nv else "", demand_trend(nv),
-                    num(r["est_fob_usd"], "${:g}"), num(r["est_retail_krw"], "{:,}원"),
+                    *[f'<span{naver_title(nv.get("checked_at"))}>{x}</span>' for x in (
+                        num(nv.get("volume_idx"), "{:g}") if nv else '<span class="muted">–</span>',
+                        pct(nv.get("growth_3m")) if nv else "", pct(nv.get("yoy")) if nv else "")],
+                    demand_trend(nv),
+                    num(r["est_fob_usd"], "${:g}"), num(r["est_retail_krw"], "{:,}원") + price_date_tag(r["notes"]),
                     clip(r["reason"], 60), report]
                    + ([actions(r)] if SERVER["on"] else []))
     heads = ["번호", "점수", "품목", "검색량", "3개월", "전년比", "수요 추세", "FOB", "판매가", "선정 이유", "리포트"]
@@ -350,11 +374,13 @@ def discover_summary(conn, p):
     선정 이유·도매 시세(reason), 규제, 위험, 예상 판매가, 최신 예상 FOB, 추천 공급 국가·이유, 참고 상품 링크."""
     if p["stage"] != "sourcing":
         return ""
-    sc = conn.execute("SELECT est_fob_usd, total FROM product_scores WHERE product_id = ? ORDER BY id DESC LIMIT 1",
+    sc = conn.execute("SELECT est_fob_usd, total, created_at FROM product_scores WHERE product_id = ? ORDER BY id DESC LIMIT 1",
                       (p["id"],)).fetchone()
     country = p["source_country"]
     items = [("선정 이유·도매 시세", e(p["reason"]) if p["reason"] else ""),
-             ("예상 판매가", num(p["est_retail_krw"], "{:,.0f}원") if p["est_retail_krw"] is not None else ""),
+             ("예상 판매가", num(p["est_retail_krw"], "{:,.0f}원")
+              + (f' <span class="muted">(시세 {price_checked_on(p["notes"])[5:]} 확인)</span>' if price_checked_on(p["notes"]) else "")
+              if p["est_retail_krw"] is not None else ""),
              ("예상 FOB", num(sc["est_fob_usd"], "${:,.2f}") if sc and sc["est_fob_usd"] is not None else ""),
              ("추천 공급 국가", (e(db.SOURCE_COUNTRIES.get(country, country)) +
                              (f' <span class="muted">— {e(p["source_country_reason"])}</span>' if p["source_country_reason"] else ""))
@@ -365,7 +391,8 @@ def discover_summary(conn, p):
     rows = "".join(f'<div><span class="muted">{k}</span> {v}</div>' for k, v in items if v)
     if not rows:
         return ""
-    score = f' · {sc["total"]}점' if sc and sc["total"] is not None else ""
+    score = (f' · {sc["total"]}점' if sc and sc["total"] is not None else "") + (
+        f' · {e(sc["created_at"][:10])} 조사' if sc and sc["created_at"] else "")
     return (f'<details class="disc-sum small"><summary>1번 시장조사 요약{score}</summary>'
             f'<div class="long">{rows}</div></details>')
 
@@ -451,8 +478,20 @@ def sourcing_report(conn, product_id, mode):
     return report_html, ranks
 
 
-def supplier_row(s, report_html, ranks):
+def _md(at):
+    """'2026-11-24T…' → '11/24'"""
+    return f"{at[5:7]}/{at[8:10]}" if at and len(at) >= 10 else ""
+
+
+def supplier_row(s, report_html, ranks, latest_run=None):
+    """latest_run = 이 구매 방식 그룹의 최신 2번 실행 번호 — 그보다 예전 조사에서 나온 줄은 조사 날짜를 흐리게."""
     rank = ranks.get(s["link_id"])
+    at = _field(s, "ps_researched_at")
+    seen = ""
+    if at:
+        old = latest_run is not None and s["run_id"] != latest_run
+        seen = (f'<div class="small{" muted" if old else ""}" title="2번 조사 {e(at[:16])} · 실행 #{s["run_id"]}'
+                f'{" (예전 조사에서 나온 업체)" if old else ""}">조사 {_md(at)} (#{s["run_id"]})</div>')
     name = (f'<a href="{e(file_href(report_html))}#s{rank}" target="_blank" title="리포트에서 상세 보기">{e(s["company"])}</a>'
             if rank else e(s["company"]))
     site = web_link(s["url"], "업체 페이지 ↗")
@@ -466,7 +505,7 @@ def supplier_row(s, report_html, ranks):
         f'{" · " + num(s["years_in_business"], "{:g}년") if s["years_in_business"] else ""}'
         f'{" · " + site if site else ""}</div>{badge}</div></div>',
         f'<span class="trust t{e(s["trust"])}">{e(s["trust"] or "–")}</span> <span class="small">{e(supplier_score(s))}</span>'
-        + (f'<div class="small">{clip(reason, 60)}</div>' if reason else ""),
+        + (f'<div class="small">{clip(reason, 60)}</div>' if reason else "") + seen,
         e(s["status"]), f'{moq_badge(s)}<div>{clip(s["moq"], 30)}</div>', clip(s["price_note"] or num(s["unit_price_usd"], "${:g}"), 50),
         contact or '<span class="muted">–</span>',
         clip(s["red_flags"], 50),
@@ -482,8 +521,10 @@ def products_in_progress(conn):
     for p in prods:
         sups = conn.execute("""
             SELECT s.*, ps.id AS link_id, ps.image_url AS sup_image, ps.status, ps.is_top_pick, ps.moq, ps.price_note, ps.unit_price_usd, ps.run_id,
-                   ps.score AS ps_score, ps.grade AS ps_grade, ps.purchase_mode AS ps_mode, ps.max_order_qty AS ps_max_qty
+                   ps.score AS ps_score, ps.grade AS ps_grade, ps.purchase_mode AS ps_mode, ps.max_order_qty AS ps_max_qty,
+                   COALESCE(ar.finished_at, ar.started_at) AS ps_researched_at
             FROM product_suppliers ps JOIN suppliers s ON s.id = ps.supplier_id
+            LEFT JOIN agent_runs ar ON ar.id = ps.run_id   -- 조사 날짜 = 그 줄을 만든 2번 실행 (ps.updated_at은 다른 에이전트도 바꿈)
             WHERE ps.product_id = ? ORDER BY ps.is_top_pick DESC, ps.id""", (p["id"],)).fetchall()
         groups = {}                               # 구매 방식별로 나눠 보여 줌 (retail = 구매대행, small_batch = 소량 사입)
         for s in sups:
@@ -494,8 +535,12 @@ def products_in_progress(conn):
                 continue
             report_html, ranks = sourcing_report(conn, p["id"], mode)
             rep = link(report_html, "리포트") if report_html else ""
-            rows = [supplier_row(s, report_html, ranks) for s in groups[mode]]
-            blocks.append(f"""<div class="ps-group"><h3 class="ps-mode">{e(label)} <span class="muted small">{len(rows)}곳</span>
+            dated = [s for s in groups[mode] if s["ps_researched_at"] and s["run_id"] is not None]
+            latest = max(dated, key=lambda s: (s["ps_researched_at"], s["run_id"])) if dated else None
+            rows = [supplier_row(s, report_html, ranks, latest["run_id"] if latest else None) for s in groups[mode]]
+            when = (f' <span class="muted small" title="이 구매 방식 최신 2번 조사 {e(latest["ps_researched_at"][:16])} · 실행 #{latest["run_id"]}">'
+                    f'· 최근 조사 {_md(latest["ps_researched_at"])}</span>' if latest else "")
+            blocks.append(f"""<div class="ps-group"><h3 class="ps-mode">{e(label)} <span class="muted small">{len(rows)}곳</span>{when}
     <span class="small">{rep}</span></h3>
   {channel_strip(conn, p["id"], mode)}
   {table(SUPPLIER_HEADS, rows, "tight sup")}</div>""")

@@ -287,7 +287,7 @@ def test_sourcing_card_shows_discover_summary(conn):
         cand = db.upsert_product(conn, "후보 품목", reason="후보 이유")
     html, _ = dashboard.products_in_progress(conn)
     card = html[html.index(f'id="prod-{pid}"'):html.index(f'id="prod-{bad}"')]
-    assert "<summary>1번 시장조사 요약 · 72점</summary>" in card                      # 최신 점수·FOB
+    assert "<summary>1번 시장조사 요약 · 72점 · " in card and " 조사</summary>" in card   # 최신 점수·FOB·조사일
     assert "수요 증가 &lt;급등&gt; · 도매 $30~40" in card and "$35.50" in card and "$20.00" not in card
     assert "189,000원" in card and "일본" in card and "일본 중고 시장이 큼" in card
     assert "전파인증 필요" in card and "중고 품질 편차" in card
@@ -497,3 +497,35 @@ def test_supplier_table_wider_score_and_price(conn):
     assert '<table class="tight sup">' in html and "4구 LED형 (변형 이름이" in html
     assert dashboard.SUPPLIER_HEADS[2] == "신뢰도·점수" and dashboard.SUPPLIER_HEADS[5] == "단가"   # nth-child(3)·(6)
     assert "table.sup td:nth-child(3)" in dashboard.CSS and "table.sup td:nth-child(6)" in dashboard.CSS
+
+
+def test_research_dates_candidate_card_and_suppliers(conn):
+    import json
+    with conn:
+        a = db.upsert_product(conn, "찜기", stage="candidate")
+        conn.execute("UPDATE products SET est_retail_krw = 13980, notes = ? WHERE id = ?",
+                     ("[변형 혼합] [1번 시세 2026-11-24] 판매가 확인\n사람 메모", a))
+        conn.execute("INSERT INTO product_scores (product_id, total, naver_json, created_at) VALUES (?, 70, ?, '2026-11-19T10:00:00')",
+                     (a, json.dumps({"volume_idx": 3, "checked_at": "2026-11-24T09:00:00",
+                                     "shopping_insight": {"trend": "오름", "change_3m": 5, "checked_at": "2026-11-23"}})))
+    html, _ = dashboard.candidate_rows(conn)
+    assert "11-19 조사</div>" in html and 'title="1번 조사·평가일 2026-11-19"' in html
+    assert "시세 11-24</div>" in html and 'title="네이버 조회 2026-11-24"' in html and "네이버 조회 2026-11-23" in html
+    assert dashboard.price_checked_on("메모만") is None and dashboard.price_date_tag(None) == ""
+
+    with conn:
+        conn.execute("UPDATE products SET stage = 'sourcing' WHERE id = ?", (a,))
+        old = conn.execute("INSERT INTO agent_runs (agent, status, started_at, finished_at) VALUES "
+                           "('sourcing', 'succeeded', '2026-11-20T09:00:00', '2026-11-20T09:10:00')").lastrowid
+        new = conn.execute("INSERT INTO agent_runs (agent, status, started_at) VALUES "
+                           "('sourcing', 'succeeded', '2026-11-24T09:00:00')").lastrowid   # finished_at 없음 → started_at
+        s1 = db.upsert_supplier(conn, "Old Co", "China")
+        s2 = db.upsert_supplier(conn, "New Co", "China")
+        p1 = db.link_supplier(conn, a, s1, unit_price_usd=1.0)
+        p2 = db.link_supplier(conn, a, s2, unit_price_usd=1.0)
+        conn.execute("UPDATE product_suppliers SET run_id = ?, purchase_mode = 'small_batch' WHERE id = ?", (old, p1))
+        conn.execute("UPDATE product_suppliers SET run_id = ?, purchase_mode = 'small_batch' WHERE id = ?", (new, p2))
+    card, _ = dashboard.products_in_progress(conn)
+    assert "· 최근 조사 11/24</span>" in card and "(시세 11-24 확인)" in card and "2026-11-19 조사</summary>" in card
+    assert f'<div class="small muted" title="2번 조사 2026-11-20T09:10 · 실행 #{old} (예전 조사에서 나온 업체)">조사 11/20 (#{old})</div>' in card
+    assert f'<div class="small" title="2번 조사 2026-11-24T09:00 · 실행 #{new}">조사 11/24 (#{new})</div>' in card
