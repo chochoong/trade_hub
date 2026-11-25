@@ -256,12 +256,12 @@ def price_checked_on(notes):
 
 def price_date_tag(notes):
     d = price_checked_on(notes)
-    return f'<div class="small muted" title="1번 국내 시세 확인 {d}">시세 {d[5:]}</div>' if d else ""
+    return f'<div class="small muted" title="1번 국내 시세 확인 {d}">{d[5:]}</div>' if d else ""
 
 
 def naver_title(d):
     """네이버 조회일 → title 속성 (없으면 빈 문자열)."""
-    return f' title="네이버 조회 {e(str(d)[:10])}"' if d else ""
+    return f' title="{e(str(d)[:10])}"' if d else ""
 
 
 def demand_trend(nv):
@@ -285,7 +285,7 @@ def demand_trend(nv):
         text += f" · {season}"
     months, series = si.get("months") or [], si.get("series") or []
     tip = (f'네이버 쇼핑인사이트 · {si.get("category") or ""} · 「{si.get("keyword") or ""}」 클릭 추세 (최근 3개월 ÷ 그 전 3개월)\n'
-           + (f'네이버 조회 {str(si["checked_at"])[:10]}\n' if si.get("checked_at") else "")
+           + (f'{str(si["checked_at"])[:10]}\n' if si.get("checked_at") else "")
            + "키워드 자기 최대=100 상대값이라 품목끼리 크기 비교는 검색량으로\n"
            + " ".join(f"{str(m)[2:]}:{v:g}" for m, v in zip(months, series) if isinstance(v, (int, float))))
     return f'<span class="small" title="{e(tip)}">{text}</span>'
@@ -322,7 +322,7 @@ def candidate_rows(conn):
         out.append([f'<span class="anchor" id="prod-{r["id"]}"></span>#{r["id"]}'
                     + ('<div class="small muted">직접 조사</div>' if r["origin"] == "manual" else ""),
                     f'<b class="score">{num(r["total"])}</b>'
-                    + (f'<div class="small muted" title="1번 조사·평가일 {e(r["scored_at"][:10])}">{e(r["scored_at"][5:10])} 조사</div>'
+                    + (f'<div class="small muted" title="1번 조사·평가일 {e(r["scored_at"][:10])}">{e(r["scored_at"][:10])}</div>'
                        if r["scored_at"] else ""),
                     f'<div class="pcell">{photo(r)}<div>{e(r["name"])}<div class="muted small">{e(r["category"])} · {sub}</div>'
                     f'<div class="small">{search_links(r)}</div></div></div>',
@@ -379,7 +379,7 @@ def discover_summary(conn, p):
     country = p["source_country"]
     items = [("선정 이유·도매 시세", e(p["reason"]) if p["reason"] else ""),
              ("예상 판매가", num(p["est_retail_krw"], "{:,.0f}원")
-              + (f' <span class="muted">(시세 {price_checked_on(p["notes"])[5:]} 확인)</span>' if price_checked_on(p["notes"]) else "")
+              + (f' <span class="muted" title="1번 국내 시세 확인일">({price_checked_on(p["notes"])[5:]})</span>' if price_checked_on(p["notes"]) else "")
               if p["est_retail_krw"] is not None else ""),
              ("예상 FOB", num(sc["est_fob_usd"], "${:,.2f}") if sc and sc["est_fob_usd"] is not None else ""),
              ("추천 공급 국가", (e(db.SOURCE_COUNTRIES.get(country, country)) +
@@ -392,7 +392,7 @@ def discover_summary(conn, p):
     if not rows:
         return ""
     score = (f' · {sc["total"]}점' if sc and sc["total"] is not None else "") + (
-        f' · {e(sc["created_at"][:10])} 조사' if sc and sc["created_at"] else "")
+        f' · {e(sc["created_at"][:10])}' if sc and sc["created_at"] else "")
     return (f'<details class="disc-sum small"><summary>1번 시장조사 요약{score}</summary>'
             f'<div class="long">{rows}</div></details>')
 
