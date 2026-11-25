@@ -18,7 +18,7 @@
 | 3 | `compliance` | 통관·규제 체크 (발주 전 — KC 인증·표시는 생산 때 해결, 선적 뒤엔 통관 보류→폐기·반송) | `../compliance_agent` | ✅ 연결됨 (`python -m compliance_agent check-hub`, 슈퍼바이저 설정은 꺼짐) |
 | 4 | `costing` | 원가·수익 계산 (목표가·포기 가격은 공용 DB에 쓰지 않음 — 로컬 보고서만) | `../cost_agent` | ✅ 연결됨 (`python -m cost_agent from-hub`) |
 | 5 | `negotiation` | 커뮤니케이션·협상 (메일은 초안만) — 인증 요건·원가를 안 뒤에 | `../negotiation_agent` | ✅ 연결됨 (7.7) |
-| 6 | `documents` | 무역서류 (PI·CI·PL·계약서) — PO 초안부터, 발송·결제 안 함 | `../trade_docs_agent` | 설정 등록됨 (꺼짐, `documents` 표 v18) |
+| 6 | `documents` | 무역서류 (PI·CI·PL·계약서) — PO 초안부터, 발송·결제 안 함 | `../trade_docs_agent` | ✅ 연결됨 (`scripts/tradedocs.py from-hub`, `documents` 표 v18) |
 | 7 | `sales` | 판매·마케팅 | 미정 | - |
 | 8 | `finance` | 재무·관리 | 미정 | - |
 | - | `supervisor` | 관제탑 (이 문서) | `trade_hub` | ✅ |

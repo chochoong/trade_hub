@@ -87,7 +87,7 @@ python supervisor.py backup          # 공용 DB 백업 (tick에서 하루 1번 
 | 3. compliance | `../compliance_agent` | 공용 DB 연동됨 (`python -m compliance_agent check-hub` → `compliance_checks`) — 슈퍼바이저 설정은 꺼짐 |
 | 4. costing | `../cost_agent` | 연결됨 — `python -m cost_agent from-hub` (가격이 생기거나 바뀐 공급처 줄의 개당 원가·마진 → `product_suppliers.est_landed_krw·est_margin_pct`) |
 | 5. negotiation | `../negotiation_agent` | 연결됨 — 대시보드 5번 페이지 버튼 + 슈퍼바이저 `auto`(답장 분석·후속 메일) |
-| 6. documents | `../trade_docs_agent` | 설정 등록됨 (꺼짐) — `scripts/tradedocs.py from-hub` (선정 공급처 견적 → PO 초안 xlsx → `documents`·`tasks`, 승인은 6번 approve) · openpyxl 필요 |
+| 6. documents | `../trade_docs_agent` | 연결됨 — `scripts/tradedocs.py from-hub` (선정 공급처 견적 → PO 초안 xlsx → `documents`·`tasks`, 승인은 6번 approve) · openpyxl 필요 |
 | 7·8 | 미정 | 설정 예시만 (꺼짐) |
 
 ## 5. 테스트

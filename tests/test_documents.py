@@ -18,7 +18,7 @@ def seed(conn):
 
 
 def test_when_sql_po_needed_then_rerun_after_new_quote(conn):
-    assert WHEN["enabled"] is False and WHEN["cwd"] == "../trade_docs_agent"
+    assert WHEN["cwd"] == "../trade_docs_agent" and WHEN["command"][-1] == "from-hub"
     count = lambda: conn.execute(WHEN["when_sql"]).fetchone()[0]
     pid, ps = seed(conn)
     assert count() == 0                                                     # 견적 없음
