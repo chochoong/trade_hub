@@ -662,7 +662,7 @@ def supplier_row(s, report_html, ranks, latest_run=None, p=None, ctx=None):
         e(s["status"]), f'{moq_badge(s)}<div>{clip(s["moq"], 30)}</div>', clip(s["price_note"] or num(s["unit_price_usd"], "${:g}"), 50),
         *(channel_cells(s, p, ctx or {}) if p is not None else [""] * len(CHANNEL_COLS)),
         contact or '<span class="muted">–</span>',
-        clip(s["red_flags"], 50, rep, sep=", "),
+        clip(s["red_flags"], 90, rep, sep=", "),
     ]
 
 
@@ -843,7 +843,9 @@ th{font-size:12px;color:var(--muted);font-weight:600;white-space:nowrap}tr:last-
 table.tight td{padding:6px 8px}
 table.sup td:nth-child(3),table.sup th:nth-child(3){min-width:200px}   /* 2번 공급처 표: 신뢰도·점수 */
 table.sup td:nth-child(6),table.sup th:nth-child(6){min-width:140px}
-table.sup td:nth-child(7),table.sup th:nth-child(7){min-width:130px}   /* 스마트스토어 권장가 */   /* 단가 (price_note 변형 이름까지) */
+table.sup td:nth-child(7),table.sup th:nth-child(7){min-width:130px}
+table.sup .pcell{min-width:190px}   /* 공급처 칸 줄이고 */
+table.sup td:nth-child(9),table.sup th:nth-child(9){min-width:260px}   /* 위험 요소 칸 늘림 */   /* 스마트스토어 권장가 */   /* 단가 (price_note 변형 이름까지) */
 .score{font-size:16px;color:var(--accent)}.up{color:var(--ok)}.down{color:var(--bad)}
 .ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}
 .pri{display:inline-block;width:20px;height:20px;border-radius:50%;text-align:center;font-size:12px;line-height:20px;color:#fff}
