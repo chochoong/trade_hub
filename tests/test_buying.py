@@ -146,11 +146,13 @@ def test_search_form_only_in_server_mode(ba):
     assert 'value="food"' not in html
     assert 'name="query" required maxlength="100" autocomplete="off" placeholder' in html   # 새로 고침하면 빈 칸 (value 없음)
     assert html.index('data-lang="en"') < html.index('data-lang="ja"') < html.index('data-lang="zh"')
-    assert html.index('value="rakuten"') < html.index('value="ebay"') < html.index('value="china"')
-    assert 'value="aliexpress"' not in html and "타오바오·1688(중국어" not in html     # 중국 항목 하나로 합침
-    assert '<option value="china" data-lang="zh">중국(타오바오·1688·알리 · 중국어 · 링크만)</option>' in html
-    assert "알리·이베이는 buyagent에 API 키" not in html and "야후는 buyagent에 앱 ID, 이베이는 API 키 필요" in html
-    assert 'title="영어로 번역 (이베이용)"' in html and 'title="중국어로 번역 (중국(타오바오·1688·알리) 링크용)"' in html
+    assert html.index('value="rakuten"') < html.index('value="ebay"') < html.index('value="aliexpress"') < html.index('value="china"')
+    assert 'value="yahoo"' not in html                                 # 야후는 '일본'에 함께 (메뉴에 따로 없음)
+    assert '<option value="rakuten" data-lang="ja">일본: 라쿠텐·야후 함께(일본어로 검색)</option>' in html
+    assert '<option value="aliexpress" data-lang="en">알리익스프레스(중국 직배송·영어로 자동 검색)</option>' in html
+    assert '<option value="china" data-lang="zh">타오바오·1688(중국어 · 링크만)</option>' in html
+    assert "이베이·알리는 buyagent에 API 키 필요 (알리는 토큰도" in html
+    assert 'title="영어로 번역 (이베이·알리용)"' in html and 'title="중국어로 번역 (타오바오·1688 링크용)"' in html
     assert '<option value="ebay" data-lang="en">이베이(미국·영어로 검색)</option>' in html
 
 
@@ -306,22 +308,29 @@ def test_china_option_links_only_no_api_search():
     china = js.index('if (body.market === "china") {')
     branch = js[china:js.index("startJob(\"/api/buysearch\"", china)]
     assert 'buyTranslate(f, "zh")' in branch and "buyLinks(f, q)" in branch and "return;" in branch   # 중국어로만 번역, API 전에 끝
-    for site in ("https://s.taobao.com/search?q=", "https://s.1688.com/selloffer/offer_search.htm",
-                 "https://www.aliexpress.com/w/wholesale-"):
+    for site in ("https://s.taobao.com/search?q=", "https://s.1688.com/selloffer/offer_search.htm"):
         assert site in js
-    assert [k for k, _ in buying.SITE_OPTIONS] == ["rakuten", "yahoo", "ebay", "china"]
-    assert "aliexpress" in buying.BUY_MARKETS and "yahoo" in buying.BUY_MARKETS   # 서버 허용 값 (알리는 화면에서만 안 부름)
+    assert "https://www.aliexpress.com/w/wholesale-" not in js         # 알리는 자동 검색으로
+    assert [k for k, _ in buying.SITE_OPTIONS] == ["rakuten", "ebay", "aliexpress", "china"]
+    assert "aliexpress" in buying.BUY_MARKETS and "yahoo" in buying.BUY_MARKETS   # 서버 허용 값 (yahoo는 명령줄 확인용)
 
 
-def test_yahoo_option_only_when_buyagent_accepts_market(tmp_path):
-    main = tmp_path / "main.py"
-    main.write_text('SEARCH_MARKETS = {\n    "rakuten": {"lang": "ja"},\n    "ebay": {"lang": "en"},\n}\n', encoding="utf-8")
-    assert [k for k, _ in buying.site_options(tmp_path)] == ["rakuten", "ebay", "china"]
-    main.write_text('SEARCH_MARKETS = {\n    "rakuten": {"lang": "ja"},\n    "yahoo": {"lang": "ja", "sources": ["yahoo"]},\n}\n',
-                    encoding="utf-8")
-    assert [k for k, _ in buying.site_options(tmp_path)] == ["rakuten", "yahoo", "ebay", "china"]
-    assert [k for k, _ in buying.site_options(tmp_path / "none")] == ["rakuten", "ebay", "china"]
-    assert buying.SITE_LANG["yahoo"] == "ja"
+def test_overseas_shipping_notes_competition_and_full_warnings():
+    direct = buying.cost_cell({"cost_krw": 50000, "forwarding_krw": 8000, "shipping_profile": "small",
+                               "ship_route": "direct", "ship_overseas": "api"})
+    assert "판매자 직배송 추정 8,000원 포함 (small)" in direct and "해외배송 가능" in direct
+    fwd = buying.cost_cell({"cost_krw": 50000, "forwarding_krw": 9000, "ship_route": "forwarder", "ship_overseas": "표시:海外発送"})
+    assert "배대지 9,000원 포함" in fwd and "해외배송 표시" in fwd and "海外発送" in fwd
+    assert "해외배송" not in buying.cost_cell({"cost_krw": 50000, "forwarding_krw": 9000})
+
+    class NL:
+        @staticmethod
+        def search_url(kw):
+            return "https://search.shopping.naver.com/search/all?query=" + kw
+    st = {"price": 150000, "checked": "2026-11-25", "memo": "", "days": 0, "stale": False}
+    cell = buying.naver_cell({"naver_low": NL}, "x", st, 200000, "W1", 159443)
+    assert "경쟁 불가" in cell and "개당 원가(159,443원)보다 낮음" in cell
+    assert "경쟁 불가" not in buying.naver_cell({"naver_low": NL}, "x", st, 200000, "W1", 100000)
 
 
 @pytest.mark.skipif(not REAL_WEB.is_file(), reason="buyagent web.py 없음")

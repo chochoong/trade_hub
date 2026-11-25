@@ -1907,8 +1907,7 @@ function buyTranslate(f, lang) {
 function buyLinks(f, q) {   // 중국 사이트는 자동 검색이 없음 → 검색 결과 페이지 링크 (사람이 직접 확인)
   var box = f.parentNode.querySelector(".buylinks"), u = encodeURIComponent(q);
   var sites = [["타오바오", "https://s.taobao.com/search?q=" + u],
-               ["1688", "https://s.1688.com/selloffer/offer_search.htm?charset=utf8&keywords=" + u],
-               ["알리익스프레스", "https://www.aliexpress.com/w/wholesale-" + u + ".html"]];
+               ["1688", "https://s.1688.com/selloffer/offer_search.htm?charset=utf8&keywords=" + u]];
   box.innerHTML = "";
   box.appendChild(document.createTextNode("「" + q + "」 중국 사이트에서 보기: "));
   sites.forEach(function (s, i) {
@@ -1929,7 +1928,7 @@ document.addEventListener("click", function (ev) {   // 언어 버튼: 번역 + 
   }
   buyTranslate(f, lang).catch(function (err) { alert(err.message); });
 });
-document.addEventListener("submit", function (ev) {   // 검색 → 라쿠텐·야후·이베이: /api/buysearch (buyagent --market) · 중국: 중국어 번역 + 타오바오·1688·알리 링크만 (API 안 부름)
+document.addEventListener("submit", function (ev) {   // 검색 → 일본(라쿠텐·야후)·이베이·알리: /api/buysearch (buyagent --market) · 중국: 중국어 번역 + 타오바오·1688 링크만 (API 안 부름)
   var f = ev.target.closest("form.buysearch");
   if (!f) return;
   ev.preventDefault();

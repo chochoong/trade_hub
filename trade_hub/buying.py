@@ -248,8 +248,14 @@ def cost_cell(it):
     if not isinstance(cost, (int, float)):
         return num(cost, "{:,}원")
     fwd, prof, parts = it.get("forwarding_krw"), it.get("shipping_profile"), []
-    if isinstance(fwd, (int, float)):
-        parts.append(f"배대지 {fwd:,.0f}원 포함" + (f" ({prof})" if prof else "") if fwd else "배대지 없음 (직배송)")
+    if it.get("ship_route") == "direct" and isinstance(fwd, (int, float)):   # 판매자 해외배송 → 직배송 추정 요금
+        parts.append(e(f"판매자 직배송 추정 {fwd:,.0f}원 포함" + (f" ({prof})" if prof else "")))
+    elif isinstance(fwd, (int, float)):
+        parts.append(e(f"배대지 {fwd:,.0f}원 포함" + (f" ({prof})" if prof else "") if fwd else "배대지 없음 (직배송)"))
+    if it.get("ship_overseas"):
+        parts.append(f'<span class="moq ok" title="근거: {e(it["ship_overseas"])}">해외배송 가능</span>'
+                     if it.get("ship_route") == "direct" else
+                     f'<span class="moq unk" title="근거: {e(it["ship_overseas"])}">해외배송 표시</span>')
     o = it.get("best_offer") or {}
     if o:
         if not o.get("shipping_known"):
@@ -257,8 +263,8 @@ def cost_cell(it):
         elif not o.get("shipping"):
             parts.append("현지배송 무료")
         else:
-            parts.append(f"현지배송 {o.get('shipping')} {o.get('currency') or ''} 포함".replace("  ", " "))
-    return f"{cost:,.0f}원" + (f'<div class="small muted">{e(" · ".join(parts))}</div>' if parts else "")
+            parts.append(e(f"현지배송 {o.get('shipping')} {o.get('currency') or ''} 포함".replace("  ", " ")))
+    return f"{cost:,.0f}원" + (f'<div class="small muted">{" · ".join(parts)}</div>' if parts else "")
 
 
 def _hub_id(row):
@@ -333,7 +339,7 @@ def _settings(base):
     return {"naver_low": out}
 
 
-def naver_cell(data, kw, st, rec, pid=""):
+def naver_cell(data, kw, st, rec, pid="", cost=None):
     """스마트스토어 권장가 아래: [네이버 최저가 보기 ↗] + 사람이 적은 최저가 + [최저가 적기] (buyagent web.naver_cell과 같은 표시).
     링크는 사람이 눌러 보는 용도 — 서버가 네이버 페이지를 열거나 읽지 않음 (크롤링 없음)."""
     from trade_hub.dashboard import SERVER, e
@@ -352,6 +358,9 @@ def naver_cell(data, kw, st, rec, pid=""):
                 else f'{e(st["checked"][5:])} 확인')
         tip = f' title="메모: {e(st["memo"])}"' if st["memo"] else ""
         out += f'<div class="small"{tip}>네이버 최저가 {st["price"]:,}원 · {when}{cmp}</div>'
+        if isinstance(cost, (int, float)) and cost > 0 and st["price"] <= cost:   # buyagent web.naver_cell과 같은 규칙
+            out += (f'<div class="small"><span class="moq bad">경쟁 불가</span> <span class="bad">네이버 최저가가 '
+                    f'개당 원가({cost:,.0f}원)보다 낮음 → 구매대행으로는 이 값에 맞출 수 없어요</span></div>')
     elif pid:
         out += '<div class="small muted">네이버 최저가 미입력</div>'
     if pid and SERVER["on"]:
@@ -474,7 +483,8 @@ def _latest_section(data):
                  and isinstance(q.get("margin"), (int, float)) else '<span class="muted">–</span>' for m in markets]
         if data.get("naver_low") and "naver" in markets:
             kw, st, pid = _watch_naver(data, it)
-            cells[markets.index("naver")] += naver_cell(data, kw, st, (quotes.get("naver") or {}).get("recommended_price"), pid)
+            cells[markets.index("naver")] += naver_cell(data, kw, st, (quotes.get("naver") or {}).get("recommended_price"), pid,
+                                                    it.get("cost_krw"))
         notes = (it.get("warnings") or []) + (it.get("events") or [])
         rows.append([_product_link(it.get("name") or it.get("id"), it.get("hub_product_id")) + ko_tag(data, it.get("name")),
                      f'<span class="{cls}">{e(label)}</span>' + (f'<div class="small">{clip(why, 50)}</div>' if why else ""),
@@ -491,38 +501,19 @@ def _latest_section(data):
 
 
 LANG_BUTTONS = [   # (언어, 버튼 이름, 설명) — 번역만 함. 검색할 사이트는 사이트 메뉴가 정함
-    ("en", "영어", "영어로 번역 (이베이용)"),
-    ("ja", "일본어", "일본어로 번역 (라쿠텐·야후용)"),
-    ("zh", "중국어", "중국어로 번역 (중국(타오바오·1688·알리) 링크용)"),
+    ("en", "영어", "영어로 번역 (이베이·알리용)"),
+    ("ja", "일본어", "일본어로 번역 (일본 라쿠텐·야후용)"),
+    ("zh", "중국어", "중국어로 번역 (타오바오·1688 링크용)"),
 ]
-# /api/buysearch 허용 값 = buyagent main.py SEARCH_MARKETS(--market)와 같은 값.
-# aliexpress(알리 제휴 API·영어 검색)는 서버에 남겨 두지만 화면 메뉴에서는 뺌 — 알리 키를 받으면 다시 넣을지 정함 (buyagent 요청 2026-11-20)
-BUY_MARKETS = {"rakuten": "라쿠텐(일본·일본어로 검색)", "yahoo": "야후 쇼핑(일본·일본어로 검색)",
-               "aliexpress": "알리익스프레스(중국·영어로 검색)", "ebay": "이베이(미국·영어로 검색)"}
-# 사이트 메뉴: 라쿠텐 / 야후 / 이베이 / 중국. china = 자동 검색 없이 중국어 검색 링크만 (타오바오·1688·알리, 화면 JS buyLinks)
-# yahoo는 buyagent main.py SEARCH_MARKETS에 "yahoo"가 있을 때만 메뉴에 보임 (site_options) — 앱 ID(일본 휴대폰 인증)는 buyagent 설정
-SITE_OPTIONS = [("rakuten", BUY_MARKETS["rakuten"]), ("yahoo", BUY_MARKETS["yahoo"]), ("ebay", BUY_MARKETS["ebay"]),
-                ("china", "중국(타오바오·1688·알리 · 중국어 · 링크만)")]
+# /api/buysearch 허용 값 = buyagent main.py SEARCH_MARKETS(--market)와 같은 값 (buyagent 요청 2026-11-24·25).
+# rakuten = 일본 라쿠텐·야후 함께 검색 (키 없는 곳은 buyagent가 빼고 notes로 알림). yahoo 단독은 명령줄 확인용 — 메뉴에 없음
+BUY_MARKETS = {"rakuten": "일본: 라쿠텐·야후 함께(일본어로 검색)", "yahoo": "야후 쇼핑(일본·일본어로 검색)",
+               "aliexpress": "알리익스프레스(중국 직배송·영어로 자동 검색)", "ebay": "이베이(미국·영어로 검색)"}
+# 사이트 메뉴: 일본 / 이베이 / 알리 / 중국 링크. china = 자동 검색 없이 중국어 검색 링크만 (타오바오·1688, 화면 JS buyLinks)
+SITE_OPTIONS = [("rakuten", BUY_MARKETS["rakuten"]), ("ebay", BUY_MARKETS["ebay"]),
+                ("aliexpress", BUY_MARKETS["aliexpress"]), ("china", "타오바오·1688(중국어 · 링크만)")]
 SITE_LANG = {"rakuten": "ja", "yahoo": "ja", "aliexpress": "en", "ebay": "en", "china": "zh"}   # 언어 버튼 ↔ 사이트 맞춤 (화면 JS)
-SITE_SHORT = {"rakuten": "라쿠텐", "yahoo": "야후", "aliexpress": "알리익스프레스", "ebay": "이베이"}
-NEEDS_BUYAGENT_MARKET = {"yahoo"}     # buyagent --market 이 받을 때만 메뉴에 넣는 사이트
-
-
-def buyagent_markets(base):
-    """buyagent main.py SEARCH_MARKETS 키 (파일 글자로 읽음 — import하지 않음). 못 읽으면 None."""
-    import re
-    try:
-        src = (Path(base) / "main.py").read_text(encoding="utf-8")
-    except OSError:
-        return None
-    m = re.search(r"^SEARCH_MARKETS\s*=\s*\{(.*?)^\}", src, re.S | re.M)
-    return set(re.findall(r'^\s*"(\w+)"\s*:', m.group(1), re.M)) if m else None
-
-
-def site_options(base):
-    """화면 사이트 메뉴: buyagent가 아직 못 받는 사이트(yahoo)는 뺌."""
-    have = buyagent_markets(base) or set()
-    return [(k, n) for k, n in SITE_OPTIONS if k not in NEEDS_BUYAGENT_MARKET or k in have]
+SITE_SHORT = {"rakuten": "일본(라쿠텐·야후)", "yahoo": "야후", "aliexpress": "알리익스프레스", "ebay": "이베이"}
 
 
 def _search_section(data):
@@ -533,7 +524,7 @@ def _search_section(data):
         # 카테고리는 미리 고르지 않음: 배송비·최소 마진이 카테고리마다 달라 잘못 고르면 권장가가 크게 틀림
         opts = '<option value="">카테고리 선택</option>' + "".join(
             f'<option value="{e(k)}">{e(n)}</option>' for k, n in categories(data["dir"]))
-        sites = "".join(f'<option value="{k}" data-lang="{SITE_LANG[k]}">{e(n)}</option>' for k, n in site_options(data["dir"]))
+        sites = "".join(f'<option value="{k}" data-lang="{SITE_LANG[k]}">{e(n)}</option>' for k, n in SITE_OPTIONS)
         langs = "".join(
             f'<button type="button" class="buylang" data-lang="{k}" title="{e(t)}">{e(n)}</button>'
             for k, n, t in LANG_BUTTONS)
@@ -546,8 +537,10 @@ def _search_section(data):
                f'<button type="submit">🔎 검색</button></form>'
                '<div class="buylinks small"></div>'
                '<p class="small muted"><b>사이트</b>를 고르고 검색하면 한글 검색어는 그 사이트 언어로 자동 번역됩니다 '
-               '(라쿠텐 30초~1분 · 야후는 buyagent에 앱 ID, 이베이는 API 키 필요). 언어 버튼은 번역 결과를 미리 보고 고치는 용도입니다 (1원 미만). '
-               '<b>중국</b>은 자동 검색 없이 중국어로 바꾼 검색 링크(타오바오·1688·알리)만 보여 줍니다. '
+               '(30초~1분 · 일본은 라쿠텐·야후를 함께 찾고 키 없는 곳은 빼고 검색 · '
+               '이베이·알리는 buyagent에 API 키 필요 (알리는 토큰도 — 만료되면 buyagent 안내대로 재발급)). '
+               '언어 버튼은 번역 결과를 미리 보고 고치는 용도입니다 (1원 미만). '
+               '<b>타오바오·1688</b>은 자동 검색이 없어 중국어로 바꾼 검색 링크만 보여 줍니다. '
                '<b>카테고리</b>는 꼭 맞게 고르세요 — 배송비·최소 마진이 달라 권장가가 크게 바뀝니다. '
                '모델명(예: SBTQ041)을 넣으면 그 단어가 들어간 상품만 남깁니다. 감시 목록·가격 이력·알림에는 영향 없습니다.</p>')
     else:
@@ -580,7 +573,8 @@ def _search_section(data):
         rows.append([str(i), f'{shop}<div class="small">{clip(it.get("name"), 70)}{ko_tag(data, it.get("name"))}</div>',
                      f'{num(o.get("price"), "{:,.0f}" if o.get("currency") in ("JPY", "KRW") else "{:,.2f}")} '
                      f'{e(o.get("currency"))} {ship}',
-                     cost_cell(it), *cells, clip(" / ".join(it.get("warnings") or []), 60)])
+                     cost_cell(it), *cells,
+                     "".join(f'<div class="small">{e(w)}</div>' for w in it.get("warnings") or [] if w)])
     ko = q.get("keyword_original")                       # 한글로 검색했으면 buyagent가 번역 → 원래 검색어도 보여 줌
     site = SITE_SHORT.get(q.get("market") or "rakuten", q.get("market"))
     sub = (f'{e(site)} "{e(q.get("keyword") or "")}"' + (f' (← {e(ko)})' if ko else "") + ' · 카테고리'
@@ -612,7 +606,8 @@ def _search_section(data):
     else:                                             # 0건 → 어떤 규칙에 몇 건이 걸렸는지 (왜 안 나오는지)
         body = ('<p class="empty">조건에 맞는 재고 있는 판매처 없음'
                 + (f'<br><span class="small">걸러낸 결과 — {why}</span>' if excl else "") + '</p>')
-    return section("직접 검색", how + watch + body + note, sub)
+    notes = "".join(f'<p class="small warn">⚠ {e(n)}</p>' for n in s.get("notes") or [] if isinstance(n, str) and n)
+    return section("직접 검색", how + watch + notes + body + note, sub)
 
 
 def _products_section(data):
