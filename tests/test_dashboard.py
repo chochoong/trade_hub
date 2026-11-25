@@ -548,3 +548,11 @@ def test_research_dates_candidate_card_and_suppliers(conn):
     assert "· 최근 조사 11/24</span>" in card and "(11-24)</span>" in card and "· 2026-11-19</summary>" in card
     assert f'<div class="small muted" title="2번 조사 2026-11-20T09:10 · 실행 #{old} (예전 조사에서 나온 업체)">조사 11/20 (#{old})</div>' in card
     assert f'<div class="small" title="2번 조사 2026-11-24T09:00 · 실행 #{new}">조사 11/24 (#{new})</div>' in card
+
+
+def test_clip_shows_full_view_link_extra_html_and_split_items():
+    assert dashboard.clip("짧은 글", 10, '<a>리포트 ↗</a>') == "짧은 글"
+    html = dashboard.clip("가" * 20, 10, '<a>리포트 ↗</a>')
+    assert 'class="clip"' in html and "전체 보기 ▸" in html and "접기 ▾" in html and html.endswith(" <a>리포트 ↗</a>")
+    flags = dashboard.clip("결제 조건 불명확, 샘플 미확인, 인증 없음", 10, sep=", ")
+    assert "<div>· 결제 조건 불명확</div><div>· 샘플 미확인</div><div>· 인증 없음</div>" in flags

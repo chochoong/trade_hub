@@ -205,14 +205,19 @@ def detail_cell(text, n=90):
     return f"{clip(text[:m.start()], n)} {link(m.group(2), m.group(1) + ' 열기')}".strip()
 
 
-def clip(text, n=90):
-    """긴 글은 앞부분만 보이고 펼치면 전체."""
+def clip(text, n=90, more="", sep=None):
+    """긴 글은 앞부분만 보이고 '전체 보기 ▸'를 누르면 전체 (펼치면 잘린 앞부분은 숨김).
+    more = 잘렸을 때만 옆에 붙일 HTML (예: 리포트 링크). sep = 펼친 글을 이 구분자로 나눠 한 줄에 하나씩."""
     if not text:
         return ""
     text = str(text)
     if len(text) <= n:
         return e(text)
-    return f'<details><summary>{e(text[:n])}…</summary><div class="long">{e(text)}</div></details>'
+    parts = [x.strip() for x in text.split(sep)] if sep else []
+    body = ("".join(f"<div>· {e(x)}</div>" for x in parts if x) if len(parts) > 1 else e(text))
+    return (f'<details class="clip"><summary><span class="cut">{e(text[:n])}… </span>'
+            f'<span class="more-link"><span class="o">전체 보기 ▸</span><span class="c">접기 ▾</span></span></summary>'
+            f'<div class="long">{body}</div></details>' + (f" {more}" if more else ""))
 
 
 def table(headers, rows, cls=""):
@@ -637,8 +642,11 @@ def supplier_row(s, report_html, ranks, latest_run=None, p=None, ctx=None):
         old = latest_run is not None and s["run_id"] != latest_run
         seen = (f'<div class="small{" muted" if old else ""}" title="2번 조사 {e(at[:16])} · 실행 #{s["run_id"]}'
                 f'{" (예전 조사에서 나온 업체)" if old else ""}">조사 {_md(at)} (#{s["run_id"]})</div>')
-    name = (f'<a href="{e(file_href(report_html))}#s{rank}" target="_blank" title="리포트에서 상세 보기">{e(s["company"])}</a>'
+    rep_href = f'{e(file_href(report_html))}#s{rank}' if rank else ""
+    name = (f'<a href="{rep_href}" target="_blank" title="리포트에서 상세 보기">{e(s["company"])}</a>'
             if rank else e(s["company"]))
+    rep = (f'<a class="small" href="{rep_href}" target="_blank" title="2번 리포트의 이 업체 상세 (요약 전체·점수 근거·위험 신호·제품 품질)">'
+           '리포트 ↗</a>') if rank else ""
     site = web_link(s["url"], "업체 페이지 ↗")
     badge = f'<div class="small">{clip(s["platform_badge"], 40)}</div>' if s["platform_badge"] else ""
     reason = (s["trust_reason"] or "").split(" — ", 1)
@@ -650,11 +658,11 @@ def supplier_row(s, report_html, ranks, latest_run=None, p=None, ctx=None):
         f'{" · " + num(s["years_in_business"], "{:g}년") if s["years_in_business"] else ""}'
         f'{" · " + site if site else ""}</div>{badge}</div></div>',
         f'<span class="trust t{e(s["trust"])}">{e(s["trust"] or "–")}</span> <span class="small">{e(supplier_score(s))}</span>'
-        + (f'<div class="small">{clip(reason, 60)}</div>' if reason else "") + competitive_badge(_field(s, "evidence_json")) + seen,
+        + (f'<div class="small">{clip(reason, 60, rep)}</div>' if reason else "") + competitive_badge(_field(s, "evidence_json")) + seen,
         e(s["status"]), f'{moq_badge(s)}<div>{clip(s["moq"], 30)}</div>', clip(s["price_note"] or num(s["unit_price_usd"], "${:g}"), 50),
         *(channel_cells(s, p, ctx or {}) if p is not None else [""] * len(CHANNEL_COLS)),
         contact or '<span class="muted">–</span>',
-        clip(s["red_flags"], 50),
+        clip(s["red_flags"], 50, rep, sep=", "),
     ]
 
 
@@ -863,6 +871,9 @@ table.sup td:nth-child(7),table.sup th:nth-child(7){min-width:130px}   /* 스마
 font-style:normal;text-align:center;color:#fff;background:rgba(0,0,0,.55)}
 .badge{background:var(--accent-soft);color:var(--accent);border-radius:999px;padding:2px 10px;font-size:12px;font-weight:600}
 details summary{cursor:pointer}.long{white-space:pre-wrap;margin-top:4px;max-width:520px}
+details.clip{display:inline}details.clip>summary{display:inline;list-style:none}details.clip>summary::-webkit-details-marker{display:none}
+details.clip .more-link{color:var(--accent,#2563eb);text-decoration:underline;white-space:nowrap;font-size:12px}
+details.clip[open] .cut,details.clip[open] .o,details.clip:not([open]) .c{display:none}details.clip[open] .long{margin-top:0}
 .disc-sum{margin:6px 0 2px}.disc-sum .long{max-width:none}.disc-sum .long>div{margin:2px 0}
 .brief{white-space:pre-wrap}.alerts li.warn{color:var(--warn)}.alerts li.critical,.alerts li.error{color:var(--bad)}
 a{color:var(--accent)}code{background:var(--accent-soft);padding:1px 5px;border-radius:4px}
