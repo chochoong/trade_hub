@@ -51,6 +51,15 @@
       "min_interval_hours": 6,
       "timeout_minutes": 15
     },
+    "documents": {
+      "enabled": false,
+      "command": ["{python}", "scripts/tradedocs.py", "from-hub"],
+      "cwd": "../trade_docs_agent",
+      "_when": "협상·샘플 단계에서 선정된 공급처 줄에 견적이 있는 품목 중, 그 품목 PO(documents.kind=po)가 없거나 최신 PO 뒤에 그 줄의 견적·통관 판정이 새로 생긴 것. 슈퍼바이저 파이썬에 openpyxl 필요",
+      "when_sql": "SELECT COUNT(*) FROM products p WHERE p.stage IN ('negotiating', 'sampling') AND EXISTS (SELECT 1 FROM product_suppliers ps JOIN quotes q ON q.product_supplier_id = ps.id WHERE ps.product_id = p.id AND ps.status = 'selected') AND ((SELECT MAX(d.created_at) FROM documents d WHERE d.product_id = p.id AND d.kind = 'po') IS NULL OR EXISTS (SELECT 1 FROM product_suppliers ps JOIN quotes q ON q.product_supplier_id = ps.id WHERE ps.product_id = p.id AND ps.status = 'selected' AND q.created_at > (SELECT MAX(d.created_at) FROM documents d WHERE d.product_id = p.id AND d.kind = 'po')) OR EXISTS (SELECT 1 FROM compliance_checks c WHERE c.product_id = p.id AND c.created_at > (SELECT MAX(d.created_at) FROM documents d WHERE d.product_id = p.id AND d.kind = 'po')))",
+      "min_interval_hours": 6,
+      "timeout_minutes": 15
+    },
     "finance": {
       "enabled": false,
       "command": ["{python}", "finance_agent.py"],

@@ -998,6 +998,32 @@ def compliance_run_bar():
               'LLM API 비용 · 판정만 기록하고 메일·단계는 바꾸지 않음</span></div>')
 
 
+DOC_KIND = {"po": "PO", "pi": "PI", "ci": "CI", "pl": "PL", "contract": "계약서", "other": "기타"}
+DOC_STATUS = {"draft": '<span class="warn">검토 대기</span>', "approved": '<span class="ok">승인됨</span>',
+              "superseded": '<span class="muted">이전 판</span>', "void": '<span class="muted">폐기</span>'}
+DOC_CHECK = {"ok": '<span class="ok">통과</span>', "warning": '<span class="warn">경고</span>', "error": '<span class="bad">오류</span>'}
+
+
+def document_rows(conn):
+    """6번 서류 (최신 판 위주: 이전 판은 접어 둠)."""
+    rows = conn.execute("""SELECT d.*, p.name, s.company FROM documents d JOIN products p ON p.id = d.product_id
+                           LEFT JOIN product_suppliers ps ON ps.id = d.product_supplier_id
+                           LEFT JOIN suppliers s ON s.id = ps.supplier_id
+                           ORDER BY d.status = 'superseded', d.id DESC""").fetchall()
+    out = []
+    for r in rows:
+        checks = _json_list(r["check_json"])
+        msgs = " · ".join(str(c.get("msg")) for c in checks if isinstance(c, dict) and c.get("msg"))
+        no = e(r["doc_no"]) + (f"-R{r['revision']}" if r["revision"] else "")
+        out.append([f'#{r["product_id"]} {e(r["name"])}', e(r["company"] or "–"), e(DOC_KIND.get(r["kind"], r["kind"])),
+                    link(r["path"], no) if r["path"] else no,
+                    num(r["qty"], "{:,}") + (f' <span class="small muted">({e(r["qty_source"])})</span>' if r["qty_source"] else ""),
+                    num(r["total_usd"], "${:,.2f}"),
+                    DOC_CHECK.get(r["check_result"], "–") + (f'<div class="small">{clip(msgs, 80)}</div>' if msgs else ""),
+                    DOC_STATUS.get(r["status"], e(r["status"])), e((r["created_at"] or "")[:16])])
+    return table(["품목", "공급처", "종류", "번호", "수량", "금액", "검증", "상태", "만든 때"], out)
+
+
 def costing_report_dir(conn):
     """4번 보고서 폴더 (cost_agent/output/hub) = 마지막 costing 실행 report_dir(.../hub/runs/<번호>)의 두 단계 위."""
     r = conn.execute("SELECT report_dir FROM agent_runs WHERE agent = 'costing' AND report_dir IS NOT NULL"
@@ -1414,7 +1440,8 @@ def agent_body(conn, agent):
         return [section("공급처별 메일·견적", html, f"{n}개 품목 · {hint}"),
                 section("발송·견적 검토 할 일", tasks_of(conn, ["send_message", "review_quote"]))]
     if agent == "documents":
-        return [section("서류 할 일", tasks_of(conn, ["document"]))]
+        return [section("서류 목록", document_rows(conn), "6번 trade_docs_agent · 승인은 6번 approve(파일 해시 확인)로만"),
+                section("서류 할 일", tasks_of(conn, ["document"]))]
     if agent == "compliance":
         return [(compliance_run_bar() if SERVER["on"] else "")
                 + section("진행 품목의 HS 코드·관세·인증", broker_line(conn) + compliance_rows(conn))]

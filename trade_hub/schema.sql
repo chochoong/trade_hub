@@ -9,7 +9,8 @@
 --  costing     4. 원가·수익 계산            → product_suppliers.est_landed_krw·est_margin_pct, tasks(decision: 포기선 마진 미달 / other: 협상 기준 반영)
 --                                          (목표가·포기 가격은 공용 DB에 쓰지 않음 — cost_agent/output/hub 보고서에만)
 --  negotiation 5. 커뮤니케이션·협상         → messages(초안), quotes, product_suppliers.supplier_specs_json
---  documents   6. 무역서류                 → (PI·CI·PL·계약서 초안: 파일 경로를 tasks/notes에)
+--  documents   6. 무역서류                 → documents(서류 번호·개정판·해시·승인 상태 [v18]), tasks(document: 'PO 초안 검토: <품목>')
+--                                          (읽기: products·product_suppliers(selected)·suppliers·quotes·compliance_checks — products.notes는 안 씀)
 --  sales       7. 판매·마케팅              → sales
 --  finance     8. 재무·관리                → orders, shipments, ledger_entries
 --  supervisor  슈퍼바이저 (스케줄러 + 검토관) → supervisor_dispatches, briefings, tasks(decision)
@@ -226,6 +227,7 @@ CREATE TABLE IF NOT EXISTS quotes (
     min_qty              INTEGER,
     price_tiers_json     TEXT CHECK (price_tiers_json IS NULL OR json_valid(price_tiers_json)),  -- [{"qty":500,"usd":2.8}, ...]
     incoterm             TEXT CHECK (incoterm IS NULL OR incoterm IN ('EXW', 'FOB', 'CFR', 'CIF', 'DAP', 'DDP')),
+    incoterm_place       TEXT,                -- 인코텀즈 지정장소 (예: Ningbo) — 5번이 답장에서 읽음 [v18]. 비면 6번은 '지정장소 미정' 경고 (국가로 추정 안 함)
     lead_time_days       INTEGER,
     payment_terms        TEXT,                -- 예: 30% 선금 / 70% 선적 전
     sample_cost_usd      REAL,
@@ -340,6 +342,34 @@ CREATE TABLE IF NOT EXISTS tasks (
     created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime')),
     done_at     TEXT
 );
+
+-- 무역서류 (6번 documents, trade_docs_agent) [v18]: 서류마다 번호·개정판·파일 해시·승인 상태
+--  * 같은 doc_no 를 다시 만들면 revision +1 (파일 이름 -R1, -R2 …), 예전 판은 superseded
+--  * 승인은 6번 approve(파일 해시 확인)만 — 끝나면 6번이 그 tasks 행을 done으로 바꿈 (trade_hub done 만으로는 승인 아님)
+--  * 금액 통화는 USD (quotes.unit_price_usd 기준)
+CREATE TABLE IF NOT EXISTS documents (
+    id                   INTEGER PRIMARY KEY,
+    kind                 TEXT NOT NULL CHECK (kind IN ('po', 'pi', 'ci', 'pl', 'contract', 'other')),
+    doc_no               TEXT NOT NULL,       -- 예: PO-2026-0036 (개정판 표시는 revision 칸)
+    revision             INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+    product_id           INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    product_supplier_id  INTEGER REFERENCES product_suppliers(id) ON DELETE SET NULL,
+    quote_id             INTEGER REFERENCES quotes(id) ON DELETE SET NULL,
+    run_id               INTEGER REFERENCES agent_runs(id),
+    task_id              INTEGER REFERENCES tasks(id) ON DELETE SET NULL,   -- 'PO 초안 검토' 할 일
+    path                 TEXT NOT NULL,       -- 파일 경로 (xlsx 등)
+    sha256               TEXT,                -- 승인할 때 확인하는 파일 해시
+    qty                  INTEGER,
+    total_usd            REAL,
+    qty_source           TEXT,                -- 수량 출처: quote_min_qty / capped_max_order_qty / manual
+    check_result         TEXT CHECK (check_result IS NULL OR check_result IN ('ok', 'warning', 'error')),
+    check_json           TEXT CHECK (check_json IS NULL OR json_valid(check_json)),   -- [{"level":"warning","msg":"지정장소 미정"}, ...]
+    status               TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'approved', 'superseded', 'void')),
+    approved_at          TEXT,
+    created_at           TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime')),
+    UNIQUE (doc_no, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_documents_product ON documents(product_id, kind, id);
 
 -- 구매 사이트 순위 (2번): "이 품목을 어느 사이트에서 사는 게 좋은가". 실행마다 사이트별 1행 → 최신 실행분을 보여준다.
 -- 점수 = 항목별 평가 × 구매 방식별 가중치 (trade_sourcing_agent/config/channels.yaml), 100점 만점  [v6]

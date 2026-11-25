@@ -26,7 +26,7 @@ from pathlib import Path
 
 PKG_DIR = Path(__file__).resolve().parent
 SCHEMA_PATH = PKG_DIR / "schema.sql"
-SCHEMA_VERSION = 17  # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
+SCHEMA_VERSION = 18  # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
 # 버전별로 추가된 컬럼: 예전 DB에는 connect() 때 ALTER TABLE로 붙인다 (새 DB는 schema.sql에 이미 있음)
 
 
@@ -62,6 +62,7 @@ MIGRATIONS = {
     16: [("compliance_checks", "basis_ps_id",        # 3번 판정에 쓴 대표 공급처 줄 (공급처 선정이 바뀌면 다시 점검)
           "INTEGER REFERENCES product_suppliers(id) ON DELETE SET NULL")],
     17: [("compliance_checks", "duty_estimate_json", _json_col("duty_estimate_json"))],   # 3번 HS 후보 관세율 참고값 (관세사 확인값 아님)
+    18: [("quotes", "incoterm_place", "TEXT")],   # 인코텀즈 지정장소 (5번이 답장에서) — documents 표는 schema.sql CREATE IF NOT EXISTS로 생김
 }
 PS_UNIQUE_INDEX = ("CREATE UNIQUE INDEX IF NOT EXISTS ux_ps_product_supplier_mode "
                    "ON product_suppliers(product_id, supplier_id, COALESCE(purchase_mode, ''))")
@@ -265,6 +266,34 @@ def advance_stage(conn, product_id, stage, run_id=None, note=None):
     if cur in TERMINAL_STAGES or STAGES.index(cur) >= STAGES.index(stage):
         return False
     return set_stage(conn, product_id, stage, run_id, note)
+
+
+def add_document(conn, kind, doc_no, product_id, path, *, product_supplier_id=None, quote_id=None, run_id=None,
+                 task_id=None, sha256=None, qty=None, total_usd=None, qty_source=None, check_result=None, checks=None):
+    """6번 서류 1건 기록. 같은 doc_no가 있으면 revision +1, 예전 초안(draft)은 superseded. 새 행 id를 돌려준다."""
+    prev = conn.execute("SELECT MAX(revision) FROM documents WHERE doc_no = ?", (doc_no,)).fetchone()[0]
+    rev = 0 if prev is None else prev + 1
+    if prev is not None:
+        conn.execute("UPDATE documents SET status = 'superseded' WHERE doc_no = ? AND status = 'draft'", (doc_no,))
+    return conn.execute(
+        "INSERT INTO documents (kind, doc_no, revision, product_id, product_supplier_id, quote_id, run_id, task_id, path, sha256,"
+        " qty, total_usd, qty_source, check_result, check_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (kind, doc_no, rev, product_id, product_supplier_id, quote_id, run_id, task_id, str(path), sha256,
+         qty, total_usd, qty_source, check_result, dumps(checks))).lastrowid
+
+
+def approve_document(conn, doc_id):
+    """6번 approve(해시 확인)가 끝난 뒤 부름: 서류를 approved로, 연결된 할 일을 done으로. (trade_hub done 만으로는 승인 아님)"""
+    row = conn.execute("SELECT task_id, status FROM documents WHERE id = ?", (doc_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"서류 {doc_id} 없음")
+    if row["status"] != "draft":
+        raise ValueError(f"서류 {doc_id}는 {row['status']} 상태라 승인할 수 없습니다")
+    conn.execute("UPDATE documents SET status = 'approved', approved_at = strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime')"
+                 " WHERE id = ?", (doc_id,))
+    if row["task_id"]:
+        conn.execute("UPDATE tasks SET status = 'done', done_at = strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime')"
+                     " WHERE id = ? AND status = 'pending'", (row["task_id"],))
 
 
 def add_task(conn, kind, title, product_id=None, run_id=None, ref_table=None, ref_id=None,
