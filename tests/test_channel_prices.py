@@ -59,3 +59,11 @@ def test_v18_db_gets_channel_prices_column(tmp_path, monkeypatch):
         assert "channel_prices_json" in [r[1] for r in c.execute("PRAGMA table_info(product_suppliers)")]
     finally:
         c.close()
+
+
+def test_channel_dash_reasons():
+    row = lambda cp: {"channel_prices_json": json.dumps(cp) if cp is not None else None}
+    p = {"id": 1, "est_retail_krw": None, "name": "x", "keywords_ko_json": None}
+    assert "4번 원가 계산 전" in dashboard.channel_cells(row(None), p, {})[0]
+    c = dashboard.channel_cells(row({"smartstore": {"target_krw": None, "walk_krw": None}, "qty": 5}), p, {})
+    assert "쿠팡 수수료 미설정" in c[0] and "100% 이상" in c[1]

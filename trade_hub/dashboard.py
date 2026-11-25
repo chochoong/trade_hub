@@ -500,7 +500,10 @@ def channel_cells(s, p, ctx):
         m = cp.get(key) if isinstance(cp.get(key), dict) else {}
         t, w = m.get("target_krw"), m.get("walk_krw")
         if not isinstance(t, (int, float)):
-            cell = '<span class="muted" title="4번 원가 계산 전">–</span>'
+            why = ("4번 원가 계산 전" if not cp else
+                   f"{label} 수수료 미설정 (cost_agent config/channels.yaml)" if key not in cp else
+                   "수수료+광고+마진이 100% 이상이라 판매가를 계산할 수 없음")
+            cell = f'<span class="muted" title="{e(why)}">–</span>'
         else:
             tip = f"{label} 목표 마진 판매가 (4번 계산값 · 시장 가격 아님)" + (
                 f" · 최소 마진 판매가 {w:,.0f}원" if isinstance(w, (int, float)) else "") + (
