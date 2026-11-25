@@ -541,6 +541,24 @@ def qty_block(cp):
     return out
 
 
+def margin_lines(m, cp):
+    """권장가 바로 아래: '마진 25% (개당 +24,900원) · 광고비 10% (9,900원)' + 작게 '수수료 · 택배 · 반품' (100원 단위).
+    4번 channel_prices_json.<채널> margin_pct·profit_krw·ad_pct·ad_krw·fee_krw·ship_krw·return_krw.
+    아직 없으면(4번 반영 전 행) 위쪽 target_margin_pct 로 '마진 N%'만."""
+    num_ = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)   # noqa: E731
+    r100 = lambda v: int(round(v / 100.0)) * 100                                # noqa: E731
+    mp = m.get("margin_pct") if num_(m.get("margin_pct")) else cp.get("target_margin_pct")
+    if not num_(mp):
+        return ""
+    line = f"마진 {mp:g}%" + (f" (개당 {r100(m['profit_krw']):+,}원)" if num_(m.get("profit_krw")) else "")
+    if num_(m.get("ad_pct")):
+        line += f" · 광고비 {m['ad_pct']:g}%" + (f" ({r100(m['ad_krw']):,}원)" if num_(m.get("ad_krw")) else "")
+    costs = " · ".join(f"{label} {r100(m[k]):,}원" for k, label in
+                       (("fee_krw", "수수료"), ("ship_krw", "택배"), ("return_krw", "반품")) if num_(m.get(k)))
+    return (f'<div class="small" title="권장가로 팔았을 때 (부가세 제외 · 4번 계산)">{line}</div>'
+            + (f'<div class="small muted">{costs}</div>' if costs else ""))
+
+
 def channel_cells(s, p, ctx):
     """공급처 줄의 마켓별 권장가 (CHANNEL_COLS) (4번 channel_prices_json — 원가 기준 계산값, 시장 가격 아님).
     스마트스토어 칸 아래 네이버 최저가 링크 + (buyagent에 사람이 적은 최저가가 있으면) 권장가 비교."""
@@ -568,7 +586,7 @@ def channel_cells(s, p, ctx):
             tip = f"{label} 목표 마진 판매가 (부가세 포함 · 4번 계산값 · 시장 가격 아님)" + (
                 f" · 최소 마진 판매가 {w:,.0f}원" if isinstance(w, (int, float)) else "") + (
                 f" · 계산 {str(cp.get('updated_at'))[:16]}" if cp.get("updated_at") else "")
-            cell = f'<b title="{e(tip)}">{t:,.0f}원</b>'
+            cell = f'<b title="{e(tip)}">{t:,.0f}원</b>' + margin_lines(m, cp)
             if basis:
                 cell += f'<div class="small muted">{" · ".join(basis)}</div>'
             if isinstance(retail, (int, float)) and retail:

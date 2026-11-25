@@ -607,3 +607,13 @@ def test_price_krw_cell_range_currency_and_tiers(monkeypatch):
     monkeypatch.setattr(fx, "rates", lambda: None)     # 환율 모르는 통화 → unit_price_usd
     jpy = {"unit_price_usd": 20, "trade_terms_json": json.dumps({"price_basis": {"currency": "JPY", "low": 3000}})}
     assert "<b>약 28,000원</b>" in dashboard.price_krw_cell(jpy)
+
+
+def test_margin_lines_under_recommended_price():
+    m = {"target_krw": 109400, "margin_pct": 25.0, "profit_krw": 24870, "ad_pct": 10, "ad_krw": 9946,
+         "fee_krw": 4980, "ship_krw": 3000, "return_krw": 180}
+    out = dashboard.margin_lines(m, {})
+    assert "마진 25% (개당 +24,900원) · 광고비 10% (9,900원)" in out and "수수료 5,000원 · 택배 3,000원 · 반품 200원" in out
+    old = dashboard.margin_lines({"target_krw": 38100}, {"target_margin_pct": 25.0})
+    assert "마진 25%</div>" in old and "광고비" not in old and "수수료" not in old
+    assert dashboard.margin_lines({"target_krw": 1}, {}) == ""
