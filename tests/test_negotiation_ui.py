@@ -188,3 +188,26 @@ def test_rfq_form_warns_only_when_supplier_has_no_email(conn):
         conn.execute("UPDATE suppliers SET contact_other = 'WeChat x / b@other.cn' WHERE company = 'Other Co'")
     html = dashboard.render(conn, server=True)
     assert warn not in html.split(f'id="ps-{ids["other"]}"')[1].split('class="neg"')[0]   # 메일 있으면 표시 안 함
+
+
+def test_selected_supplier_shows_po_handoff(conn):
+    ids = seed(conn)
+
+    def card(ps_id):
+        html = dashboard.render(conn, server=True)
+        return html.split(f'id="ps-{ps_id}"')[1].split('<div class="neg" id=')[0]
+
+    assert "6번" not in card(ids["ps"])                                             # 선정 전: 표시 없음
+    with conn:
+        conn.execute("UPDATE product_suppliers SET status = 'selected' WHERE id IN (?, ?)", (ids["ps"], ids["other"]))
+    assert "'PO 초안 대상'에 올라갔습니다" in card(ids["ps"]) and 'href="#a6"' in card(ids["ps"])
+    assert "견적이 없어 6번 PO 대상이 아닙니다" in card(ids["other"])                   # 견적 없는 선정 공급처
+    with conn:
+        conn.execute("INSERT INTO documents (kind, doc_no, revision, product_id, product_supplier_id, quote_id, path, status,"
+                     " check_result) VALUES ('po', 'PO-2026-0001', 1, ?, ?, ?, 'x.xlsx', 'draft', 'warning')",
+                     (ids["pid"], ids["ps"], ids["quote"]))
+    c = card(ids["ps"])
+    assert "6번 PO 초안 PO-2026-0001-R1" in c and "검토 대기" in c and 'href="#a6"' in c
+    with conn:
+        conn.execute("UPDATE products SET stage = 'sourcing' WHERE id = ?", (ids["pid"],))
+    assert "'발송 완료'로 표시하면 협상 단계로" in card(ids["other"])

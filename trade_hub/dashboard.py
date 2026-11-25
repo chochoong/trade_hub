@@ -1598,6 +1598,34 @@ SPEC_LABEL = {"power_source": "전원", "is_electronic": "전자회로", "has_he
               "synthetic_resin_household": "합성수지 생활용품", "textile_wearable": "섬유·착용", "origin_country": "생산국"}
 
 
+PO_STAGES = ("negotiating", "sampling")      # 6번 PO 초안 대상 단계 (po_targets·supervisor documents when_sql 과 같음)
+
+
+def selected_note(conn, s):
+    """선정한 공급처: 6번 무역서류(PO 초안)로 넘어갔는지 / 왜 아직 아닌지 한 줄 + [6번으로 가기]."""
+    if s["status"] != "selected":
+        return ""
+    r = conn.execute("""SELECT p.stage,
+                               (SELECT COUNT(*) FROM quotes q WHERE q.product_supplier_id = ps.id) AS n_quotes
+                        FROM product_suppliers ps JOIN products p ON p.id = ps.product_id WHERE ps.id = ?""",
+                     (s["link_id"],)).fetchone()
+    d = conn.execute("SELECT doc_no, revision, status, check_result FROM documents WHERE product_supplier_id = ? "
+                     "AND kind = 'po' ORDER BY id DESC LIMIT 1", (s["link_id"],)).fetchone()
+    go = '<a class="btn" href="#a6">6번으로 가기 →</a>'
+    if d is not None:
+        rev = f"-R{d['revision']}" if d["revision"] else ""
+        return (f'<div class="small ok">📄 선정 → 6번 PO 초안 {e(d["doc_no"])}{rev} '
+                f'{DOC_STATUS.get(d["status"], e(d["status"]))} {DOC_CHECK.get(d["check_result"], "")} {go}</div>')
+    if r["stage"] not in PO_STAGES:
+        why = (f"품목이 '{e(STAGE_LABEL.get(r['stage'], r['stage']))}' 단계라 아직 6번 PO 대상이 아닙니다"
+               + (" (첫 메일을 '발송 완료'로 표시하면 협상 단계로)" if r["stage"] == "sourcing" else ""))
+        return f'<div class="small warn">✅ 선정됨 — {why}</div>'
+    if not r["n_quotes"]:
+        return ('<div class="small warn">✅ 선정됨 — 견적이 없어 6번 PO 대상이 아닙니다 '
+                '(가격이 있는 답장을 붙여넣어 분석하면 올라갑니다)</div>')
+    return f'<div class="small ok">✅ 선정 → 6번 \'PO 초안 대상\'에 올라갔습니다 (PO 아직 없음) {go}</div>'
+
+
 def supplier_notes(s):
     """제외 사유 + 공급처가 답장으로 확인한 사양 (5번이 기록, 3번이 판정에 씀)."""
     out = ""
@@ -1665,7 +1693,7 @@ def supplier_thread(conn, s):
     <span class="badge">{e(PS_STATUS.get(s["status"], s["status"]))}</span>
     <span class="small">{contact or '<span class="muted">연락처 없음</span>'}</span>
     <span class="right acts row">{forms}</span></div>
-  {supplier_notes(s)}{items}{quote_rows(conn, s["link_id"])}
+  {selected_note(conn, s)}{supplier_notes(s)}{items}{quote_rows(conn, s["link_id"])}
 </div>"""
 
 
