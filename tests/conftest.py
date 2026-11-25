@@ -1,6 +1,13 @@
 import pytest
 
-from trade_hub import db
+from trade_hub import db, fx
+
+
+@pytest.fixture(autouse=True)
+def _fx_offline(monkeypatch):
+    """대시보드 환율: 테스트는 네트워크 없이 1 USD = 1,400원."""
+    monkeypatch.setattr(fx, "ONLINE", False)
+    monkeypatch.setattr(fx, "_cost_fallback", lambda: 1400.0)
 
 
 @pytest.fixture

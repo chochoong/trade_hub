@@ -15,7 +15,7 @@ from datetime import datetime
 from html import escape
 from pathlib import Path
 
-from trade_hub import buying, charts, db
+from trade_hub import buying, charts, db, fx
 
 STAGE_LABEL = {
     "candidate": "후보", "sourcing": "공급처 발굴", "negotiating": "협상", "sampling": "샘플",
@@ -641,6 +641,42 @@ def competitive_badge(evidence_json):
     return out
 
 
+def _r100(v):
+    return int(round(v / 100.0)) * 100
+
+
+def price_krw_cell(s):
+    """공급처 표 '단가' 칸 맨 위: 원화 가격 범위 (2번 trade_terms_json.price_basis low~high, 없으면 unit_price_usd 하나).
+    통화 → USD: USD면 그대로, 그 밖은 2번 fx_assumed(1 USD = ? 통화) 또는 공개 환율. USD → 원: 4번과 같은 환율(fx.usd_krw).
+    100원 단위 반올림 · 표시용 어림값 (원가 계산은 4번)."""
+    try:
+        tt = json.loads(_field(s, "trade_terms_json") or "{}")
+    except (ValueError, TypeError):
+        tt = {}
+    pb = tt.get("price_basis") if isinstance(tt, dict) and isinstance(tt.get("price_basis"), dict) else {}
+    rate, src = fx.usd_krw()
+    lo_hi, how = None, ""
+    low, high = pb.get("low"), pb.get("high")
+    if isinstance(low, (int, float)) and low > 0:
+        per = fx.per_usd(pb.get("currency"), pb.get("fx_assumed"))
+        if per:
+            hi = high if isinstance(high, (int, float)) and high >= low else low
+            lo_hi = (low / per * rate, hi / per * rate)
+            cur = (pb.get("currency") or "USD").upper()
+            how = f"{cur} {low:g}~{hi:g}" + (f" · 1 USD = {per:g} {cur}" if cur != "USD" else "")
+    if lo_hi is None and isinstance(s["unit_price_usd"], (int, float)) and s["unit_price_usd"] > 0:
+        lo_hi = (s["unit_price_usd"] * rate,) * 2
+        how = f'USD {s["unit_price_usd"]:g} (2번 단가)'
+    if lo_hi is None:
+        return ""
+    a, b = _r100(lo_hi[0]), _r100(lo_hi[1])
+    text = f"약 {a:,}원" if a == b else f"약 {a:,}~{b:,}원"
+    tiers = pb.get("tiers") if isinstance(pb.get("tiers"), list) else []
+    tip = f"{how} · 1 USD = {rate:,.0f}원 ({src}) · 100원 단위 · 표시용 어림값 (원가 계산은 4번)"
+    return (f'<div title="{e(tip)}"><b>{text}</b>'
+            + (f' <span class="small muted">· 수량 구간 {len(tiers)}개</span>' if tiers else "") + "</div>")
+
+
 def supplier_row(s, report_html, ranks, latest_run=None, p=None, ctx=None):
     """latest_run = 이 구매 방식 그룹의 최신 2번 실행 번호 — 그보다 예전 조사에서 나온 줄은 조사 날짜를 흐리게."""
     rank = ranks.get(s["link_id"])
@@ -667,7 +703,8 @@ def supplier_row(s, report_html, ranks, latest_run=None, p=None, ctx=None):
         f'{" · " + site if site else ""}</div>{badge}</div></div>',
         f'<span class="trust t{e(s["trust"])}">{e(s["trust"] or "–")}</span> <span class="small">{e(supplier_score(s))}</span>'
         + (f'<div class="small">{clip(reason, 60, rep)}</div>' if reason else "") + competitive_badge(_field(s, "evidence_json")) + seen,
-        e(s["status"]), f'{moq_badge(s)}<div>{clip(s["moq"], 30)}</div>', clip(s["price_note"] or num(s["unit_price_usd"], "${:g}"), 50),
+        e(s["status"]), f'{moq_badge(s)}<div>{clip(s["moq"], 30)}</div>',
+        price_krw_cell(s) + clip(s["price_note"] or num(s["unit_price_usd"], "${:g}"), 50),
         *(channel_cells(s, p, ctx or {}) if p is not None else [""] * len(CHANNEL_COLS)),
         contact or '<span class="muted">–</span>',
         clip(s["red_flags"], 90, " ".join(x for x in (
@@ -735,7 +772,8 @@ def products_in_progress(conn):
         sups = conn.execute("""
             SELECT s.*, ps.id AS link_id, ps.image_url AS sup_image, ps.status, ps.is_top_pick, ps.moq, ps.price_note, ps.unit_price_usd, ps.run_id,
                    ps.score AS ps_score, ps.grade AS ps_grade, ps.purchase_mode AS ps_mode, ps.max_order_qty AS ps_max_qty,
-                   ps.channel_prices_json, ps.evidence_json, COALESCE(ar.finished_at, ar.started_at) AS ps_researched_at
+                   ps.channel_prices_json, ps.evidence_json, ps.trade_terms_json,
+                   COALESCE(ar.finished_at, ar.started_at) AS ps_researched_at
             FROM product_suppliers ps JOIN suppliers s ON s.id = ps.supplier_id
             LEFT JOIN agent_runs ar ON ar.id = ps.run_id   -- 조사 날짜 = 그 줄을 만든 2번 실행 (ps.updated_at은 다른 에이전트도 바꿈)
             WHERE ps.product_id = ? ORDER BY ps.is_top_pick DESC, ps.id""", (p["id"],)).fetchall()

@@ -591,3 +591,19 @@ def test_candidate_charts_map_bars_sparks_and_counts(conn):
     page = dashboard.render(conn)
     a1 = page[page.index('id="p-a1"'):]
     assert a1.index("후보 품목") < a1.index("후보 한눈에 보기") < a1.index("실행 기록")
+
+
+def test_price_krw_cell_range_currency_and_tiers(monkeypatch):
+    from trade_hub import fx
+    monkeypatch.setattr(fx, "rates", lambda: {"KRW": 1400, "CNY": 7.0})
+    usd = {"unit_price_usd": 11.2, "trade_terms_json": json.dumps({"price_basis": {"currency": "USD", "low": 4.42, "high": 11.2}})}
+    assert "<b>약 6,200~15,700원</b>" in dashboard.price_krw_cell(usd)
+    cny = {"unit_price_usd": 10, "trade_terms_json": json.dumps({"price_basis": {"currency": "CNY", "low": 35, "high": 35,
+                                                                                    "fx_assumed": 7.0, "tiers": [{}, {}]}})}
+    out = dashboard.price_krw_cell(cny)
+    assert "<b>약 7,000원</b>" in out and "수량 구간 2개" in out and "1 USD = 7 CNY" in out
+    assert "<b>약 14,000원</b>" in dashboard.price_krw_cell({"unit_price_usd": 10, "trade_terms_json": None})
+    assert dashboard.price_krw_cell({"unit_price_usd": None, "trade_terms_json": "{}"}) == ""
+    monkeypatch.setattr(fx, "rates", lambda: None)     # 환율 모르는 통화 → unit_price_usd
+    jpy = {"unit_price_usd": 20, "trade_terms_json": json.dumps({"price_basis": {"currency": "JPY", "low": 3000}})}
+    assert "<b>약 28,000원</b>" in dashboard.price_krw_cell(jpy)
