@@ -406,7 +406,8 @@ SOURCING_NOTE_MAX = 500
 
 
 def sourcing_opts(raw):
-    """'다시 찾기' 옵션 검증 → {"cheaper": bool, "new_only": bool, "max_price": float|None, "note": str}.
+    """'다시 찾기' 옵션 검증 → {"cheaper": bool, "new_only": bool, "max_price": 원화 정수|None, "note": str}.
+    단가 상한은 원화 — 2번이 공급 국가 통화(CNY·JPY·USD)로 바꿔 찾음.
     잘못된 값이면 ValueError(사용자에게 보여 줄 문구)."""
     if not isinstance(raw, dict):
         raise ValueError("옵션 형식이 올바르지 않습니다.")
@@ -415,11 +416,12 @@ def sourcing_opts(raw):
         mp = None
     else:
         try:
-            mp = float(mp)
+            mp = float(str(mp).replace(",", ""))
         except (TypeError, ValueError):
-            raise ValueError("단가 상한은 숫자(USD)여야 합니다.") from None
-        if not (mp > 0 and mp < 1e7):
-            raise ValueError("단가 상한은 0보다 큰 숫자(USD)여야 합니다.")
+            raise ValueError("단가 상한은 원화 숫자여야 합니다 (예: 30000).") from None
+        if not (1 <= mp < 1e10) or mp != int(mp):      # nan·inf도 여기서 걸림
+            raise ValueError("단가 상한은 1원 이상의 정수(원)여야 합니다.")
+        mp = int(mp)
     note = raw.get("note") or ""
     if not isinstance(note, str):
         raise ValueError("추가 조건은 글이어야 합니다.")
@@ -431,7 +433,7 @@ def sourcing_opts(raw):
 
 def sourcing_opt_args(o):
     """검증한 옵션 → 2번 from-db 인자 (리스트로 넘김 · 셸 해석 없음). 옵션이 없으면 []."""
-    return ((["--cheaper"] if o.get("cheaper") else []) + (["--max-price", f'{o["max_price"]:g}'] if o.get("max_price") else [])
+    return ((["--cheaper"] if o.get("cheaper") else []) + (["--max-price", str(int(o["max_price"]))] if o.get("max_price") else [])
             + (["--new-only"] if o.get("new_only") else []) + (["--note", o["note"]] if o.get("note") else []))
 
 
@@ -463,7 +465,7 @@ def select(conn, body):
     if row["stage"] == "candidate":           # 사람이 버튼으로 결정 → 단계 이동 (trade_hub select와 같음)
         with conn:
             db.set_stage(conn, pid, "sourcing", note="사람이 선정 → 공급처 발굴로 (대시보드)")
-    extra = [x for x in ("더 싼 곳만" if opts["cheaper"] else "", f'단가 ≤ ${opts["max_price"]:g}' if opts["max_price"] else "",
+    extra = [x for x in ("더 싼 곳만" if opts["cheaper"] else "", f'단가 ≤ {opts["max_price"]:,}원' if opts["max_price"] else "",
                          "새 공급처만" if opts["new_only"] else "", "추가 조건" if opts["note"] else "") if x]
     job = start_job("sourcing", (pid, mode, country) + ((opts,) if any(opts.values()) else ()),   # 옵션 없으면 지금과 같은 인자
                     f"2번 {PURCHASE_MODES[mode]}용 공급처 찾기 ({COUNTRIES[country]}"
