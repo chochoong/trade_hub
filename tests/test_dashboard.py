@@ -556,3 +556,10 @@ def test_clip_shows_full_view_link_extra_html_and_split_items():
     assert 'class="clip"' in html and "전체 보기 ▸" in html and "접기 ▾" in html and html.endswith(" <a>리포트 ↗</a>")
     flags = dashboard.clip("결제 조건 불명확, 샘플 미확인, 인증 없음", 10, sep=", ")
     assert "<div>· 결제 조건 불명확</div><div>· 샘플 미확인</div><div>· 인증 없음</div>" in flags
+
+
+def test_link_fragment_for_candidate_report_row(tmp_path):
+    f = tmp_path / "candidates.html"
+    f.write_text("x", encoding="utf-8")
+    assert dashboard.link(f, "점수표", "c81").endswith('#c81" target="_blank">점수표</a>')
+    assert "#" not in dashboard.link(f, "점수표")

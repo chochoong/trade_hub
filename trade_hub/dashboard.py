@@ -130,13 +130,14 @@ def load_reference_images(conn, log=None):
     return len(_REFS), len(need)
 
 
-def link(path, label):
+def link(path, label, frag=""):
+    """로컬 파일 링크. frag = 문서 안 위치 (예: "c81" → …#c81)."""
     if not path:
         return ""
     p = Path(path)
     if not p.exists():
         return f'<span class="muted" title="{e(path)}">{e(label)} (파일 없음)</span>'
-    return f'<a href="{e(file_href(p))}" target="_blank">{e(label)}</a>'
+    return f'<a href="{e(file_href(p))}{"#" + e(frag) if frag else ""}" target="_blank">{e(label)}</a>'
 
 
 def web_link(url, label):
@@ -323,7 +324,7 @@ def candidate_rows(conn):
         sub = " · ".join(f"{k} {num(r[c], '{:g}')}" for k, c in
                          (("수요", "demand"), ("마진", "margin"), ("경쟁", "competition"), ("규제", "regulation"),
                           ("물류", "logistics")))
-        report = link(Path(r["report_dir"]) / "candidates.html", "점수표") if r["report_dir"] else ""
+        report = link(Path(r["report_dir"]) / "candidates.html", "점수표", f'c{r["id"]}') if r["report_dir"] else ""   # 1번 리포트 표 줄 id="c{품목번호}"
         out.append([f'<span class="anchor" id="prod-{r["id"]}"></span>#{r["id"]}'
                     + ('<div class="small muted">직접 조사</div>' if r["origin"] == "manual" else ""),
                     f'<b class="score">{num(r["total"])}</b>'
