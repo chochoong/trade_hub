@@ -15,7 +15,7 @@ from datetime import datetime
 from html import escape
 from pathlib import Path
 
-from trade_hub import buying, db
+from trade_hub import buying, charts, db
 
 STAGE_LABEL = {
     "candidate": "후보", "sourcing": "공급처 발굴", "negotiating": "협상", "sampling": "샘플",
@@ -1710,7 +1710,9 @@ def agent_body(conn, agent):
                '<span class="muted small">품목 이름 없이 웹 검색·네이버 검색량으로 후보 10개 · 10~20분 · API 비용</span></div>'
                if SERVER["on"] else "")
         return [run + section("후보 품목", html, f"{n}개 · 다음 단계로: trade_hub select &lt;번호&gt; · 검색량은 '텀블러'=100"),
-                moved_on(conn), dropped(conn)]
+                moved_on(conn), dropped(conn),
+                section("후보 한눈에 보기", charts.candidate_charts(conn),
+                        "후보 단계만 · 1번 리포트 '후보 지도'와 같은 기준 · 점·막대를 누르면 표의 그 줄로")]
     if agent == "sourcing":
         html, n = products_in_progress(conn)
         return [section("품목별 공급처", html, f"{n}개 품목 · 업체 이름을 누르면 리포트 상세"),
@@ -2111,7 +2113,7 @@ def _render(conn, server):
     now =datetime.now().strftime("%Y-%m-%d %H:%M")
     return f"""<!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>무역 대시보드</title><style>{CSS}</style></head>
+<title>무역 대시보드</title><style>{CSS}{charts.CSS}</style></head>
 <body>
 <div class="top"><div class="top-in">
 <header><h1>1인 수입 무역 대시보드</h1>

@@ -1,10 +1,11 @@
+import json
 import re
 import shutil
 import subprocess
 
 import pytest
 
-from trade_hub import dashboard, db, naver
+from trade_hub import charts, dashboard, db, naver
 
 
 @pytest.fixture(autouse=True)
@@ -563,3 +564,30 @@ def test_link_fragment_for_candidate_report_row(tmp_path):
     f.write_text("x", encoding="utf-8")
     assert dashboard.link(f, "점수표", "c81").endswith('#c81" target="_blank">점수표</a>')
     assert "#" not in dashboard.link(f, "점수표")
+
+
+def test_candidate_charts_map_bars_sparks_and_counts(conn):
+    def score(pid, total, margin, nv):
+        conn.execute("INSERT INTO product_scores (product_id, total, demand, margin, competition, regulation, logistics, naver_json)"
+                     " VALUES (?, ?, 4, ?, 3, 3, 4, ?)", (pid, total, margin, json.dumps(nv)))
+    si = {"trend": "오름", "change_3m": 35, "months": [f"2025-{m:02d}" for m in range(1, 13)], "series": list(range(1, 13)),
+          "seasonal": {"is_seasonal": True, "peak_month": "2025-12"}, "keyword": "선반"}
+    with conn:
+        a = db.upsert_product(conn, "벽선반", category="주방", source_country="China")
+        b = db.upsert_product(conn, "우산꽂이", category="주방")
+        c = db.upsert_product(conn, "섞인 품목", notes="[변형 혼합] #1·#2로 나눔")
+        d = db.upsert_product(conn, "진행 품목", stage="sourcing")
+        score(a, 84, 5, {"volume_idx": 0, "growth_3m": 12, "yoy": -3, "shopping_insight": si})
+        score(b, 60, 2, {"volume_idx": None})
+        score(c, 90, 5, {"volume_idx": 5, "shopping_insight": si})
+        score(d, 95, 5, {"volume_idx": 5, "shopping_insight": si})
+    html = charts.candidate_charts(conn)
+    assert html.count('<circle class="ch-pt') == 1 and f'href="#p{a}"' in html and "ch-up" in html
+    assert "총점 84 · 검색량 0 · 3개월 +12% · 전년比 -3% · 쇼핑 추세 오름" in html
+    assert f'지도에서 뺀 품목 1개: <a href="#p{b}">#{b}</a>' in html
+    assert "섞인 품목" not in html and "진행 품목" not in html
+    assert f"#{a} 수요 4/5 × 30 = 24.0점" in html and "ch-peak" in html and "계절 12월" in html
+    assert "분류별 후보 수" in html and "중국" in html
+    page = dashboard.render(conn)
+    a1 = page[page.index('id="p-a1"'):]
+    assert a1.index("후보 품목") < a1.index("후보 한눈에 보기") < a1.index("실행 기록")
