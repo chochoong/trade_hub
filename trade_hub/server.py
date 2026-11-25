@@ -112,6 +112,9 @@ def job_command(kind, arg):
     if kind == "neg":                       # 5번: arg = negotiation_agent 명령 인자 목록 (neg_args가 검증해서 만든 것)
         cwd, python, timeout = agent_spec("negotiation")
         return [python, "-m", "negotiation_agent", *arg], cwd, timeout
+    if kind == "documents":                 # 6번 PO 초안: arg = 품목 번호 또는 None(실행 조건에 맞는 품목 전부) — documents()가 검증
+        cwd, python, timeout = agent_spec("documents")
+        return [python, "scripts/tradedocs.py", "from-hub"] + (["--product", str(int(arg))] if arg else []), cwd, timeout
     if kind == "costing":                   # 4번 원가 계산: arg = 품목 번호 (costing이 검증한 값) — 그 품목의 가격 있는 공급처 줄 전부 다시
         cwd, python, timeout = agent_spec("costing")
         return [python, "-m", "cost_agent", "from-hub", str(int(arg))], cwd, timeout
@@ -123,7 +126,7 @@ def job_command(kind, arg):
 
 KIND_AGENT = {"research": "discover", "discover": "discover", "sourcing": "sourcing", "compliance": "compliance",
               "neg": "negotiation", "buysearch": "buyagent", "cost_neg": "costing",
-              "costing": "costing"}
+              "costing": "costing", "documents": "documents"}
 # 3번 관세청 공식 데이터 대조: api = HS·관세율 파일 + 세관장확인 API(인증키 DATA_GO_KR_KEY) / files = 파일만 / off
 OFFICIAL_MODES = {"api": "공식 대조(파일+API)", "files": "공식 대조(파일만)", "off": "공식 대조 안 함"}
 # 3번 실행에 넘길 키 (서버를 켠 뒤에 넣은 키도 쓰도록): 이 서버 환경변수 > 3번 폴더 .env > trade_hub .env > Windows 사용자 환경변수
@@ -454,6 +457,30 @@ def compliance(conn, body):
     target = f"#{pid} {row['name']}" if pid else "진행 품목 전체"
     return 200, job_view(start_job("compliance", (pid, official), f"3번 통관·규제 점검 ({OFFICIAL_MODES[official]}): {target}",
                                    product_id=pid, anchor="a3"))   # 끝나면 3번 페이지로
+
+
+def documents(conn, body):
+    """6번 화면 [PO 초안 만들기]: 선정 공급처 줄의 최신 견적으로 PO 초안(xlsx) — 발송·결제·단계 변경·승인은 안 함.
+    product_id가 없으면 실행 조건(슈퍼바이저 when_sql)에 맞는 품목 전부."""
+    pid, name = body.get("product_id"), None
+    if pid not in (None, ""):
+        try:
+            pid = int(pid)
+        except (TypeError, ValueError):
+            return 400, {"error": "품목 번호가 올바르지 않습니다."}
+        row = conn.execute("SELECT name FROM products WHERE id = ?", (pid,)).fetchone()
+        if row is None:
+            return 404, {"error": f"품목 번호 {pid}가 없습니다."}
+        if not dashboard.po_ready(conn, pid):
+            return 400, {"error": f"#{pid}에 견적이 있는 선정(selected) 공급처 줄이 없습니다."}
+        name = row["name"]
+    else:
+        pid = None
+    reason = busy_reason(conn, "documents")
+    if reason:
+        return 409, {"error": reason}
+    return 200, job_view(start_job("documents", pid, f"6번 PO 초안: {f'#{pid} {name}' if pid else '조건에 맞는 품목 전부'}",
+                                   product_id=pid, anchor="a6"))   # 결과 보기 → 6번 서류 목록
 
 
 def costing(conn, body):
@@ -825,7 +852,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             return self._send(400, {"error": "요청 형식 오류"})
         route = {"/api/research": research, "/api/discover": discover, "/api/select": select, "/api/compliance": compliance, "/api/stop": stop,
-                 "/api/neg": negotiation, "/api/costneg": cost_to_negotiation, "/api/costing": costing, "/api/buysearch": buy_search,
+                 "/api/neg": negotiation, "/api/costneg": cost_to_negotiation, "/api/costing": costing, "/api/documents": documents, "/api/buysearch": buy_search,
                  "/api/translate": buy_translate, "/api/buywatch": buy_watch}.get(urlparse(self.path).path)
         if not route:
             return self._send(404, {"error": "없는 주소"})

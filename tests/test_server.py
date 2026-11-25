@@ -588,3 +588,35 @@ def test_changed_bar_js_rules(conn):
     assert "document.hidden" in check and "Object.keys(mine).length" in check and '"running"' in check
     assert "visibilitychange" in js
     assert 'id="hub-sig"' not in dashboard.render(conn)                          # 파일 대시보드엔 없음
+
+
+# --- 6번 [PO 초안 만들기] ---------------------------------------------------------------
+def test_documents_job_command(monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "agent_spec", lambda agent: (tmp_path, "py", 15))
+    assert ORIGINAL_JOB_COMMAND("documents", 7) == (["py", "scripts/tradedocs.py", "from-hub", "--product", "7"], tmp_path, 15)
+    assert ORIGINAL_JOB_COMMAND("documents", None)[0] == ["py", "scripts/tradedocs.py", "from-hub"]
+    assert server.KIND_AGENT["documents"] == "documents"
+
+
+def test_documents_route_validates_and_runs(srv, conn, monkeypatch):
+    seen = []
+    real = server.job_command
+    monkeypatch.setattr(server, "job_command", lambda kind, arg: (seen.append((kind, arg)), real(kind, arg))[1])
+    with conn:
+        pid = db.upsert_product(conn, "실리콘 찜기", stage="negotiating")
+        bare = db.upsert_product(conn, "견적 없음", stage="negotiating")
+        sid = db.upsert_supplier(conn, "Allwin", "China")
+        ps = db.link_supplier(conn, pid, sid, unit_price_usd=2.0)
+        ps2 = db.link_supplier(conn, bare, sid, unit_price_usd=2.0)
+        conn.execute("UPDATE product_suppliers SET status = 'selected' WHERE id IN (?, ?)", (ps, ps2))
+        conn.execute("INSERT INTO quotes (product_supplier_id, unit_price_usd, min_qty) VALUES (?, 2.1, 500)", (ps,))
+    code, job = call(srv + "/api/documents", {"product_id": pid})
+    assert code == 200 and f"#{pid} 실리콘 찜기" in job["label"] and job["anchor"] == "a6"
+    wait_job(srv, job["id"])
+    code, job = call(srv + "/api/documents", {})
+    assert code == 200 and "조건에 맞는 품목 전부" in job["label"]
+    wait_job(srv, job["id"])
+    assert seen == [("documents", pid), ("documents", None)]
+    assert call(srv + "/api/documents", {"product_id": bare})[0] == 400
+    assert call(srv + "/api/documents", {"product_id": "x"})[0] == 400
+    assert call(srv + "/api/documents", {"product_id": 9999})[0] == 404

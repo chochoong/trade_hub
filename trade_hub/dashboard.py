@@ -1140,6 +1140,49 @@ def doc_path(path):
     return p if p.is_absolute() else docs_dir() / p
 
 
+def po_ready(conn, product_id):
+    """선정(selected) 공급처 줄 중 견적이 있는 줄 수 (6번 from-hub가 PO를 만드는 줄)."""
+    return conn.execute("SELECT COUNT(*) FROM product_suppliers ps WHERE ps.product_id = ? AND ps.status = 'selected'"
+                        " AND EXISTS (SELECT 1 FROM quotes q WHERE q.product_supplier_id = ps.id)", (product_id,)).fetchone()[0]
+
+
+def po_targets(conn):
+    """6번 화면: 협상·샘플 단계에서 공급처를 선정한 품목 — 최신 견적·최신 PO·[PO 초안 만들기]."""
+    rows = conn.execute("""SELECT p.id, p.name, p.stage, ps.id AS ps_id, s.company,
+                                  q.id AS q_id, q.unit_price_usd, q.min_qty, q.incoterm, q.incoterm_place, q.created_at AS q_at
+                           FROM products p JOIN product_suppliers ps ON ps.product_id = p.id AND ps.status = 'selected'
+                           JOIN suppliers s ON s.id = ps.supplier_id
+                           LEFT JOIN quotes q ON q.id = (SELECT MAX(id) FROM quotes WHERE product_supplier_id = ps.id)
+                           WHERE p.stage IN ('negotiating', 'sampling') ORDER BY p.id, ps.id""").fetchall()
+    out, seen = [], set()
+    for r in rows:
+        d = conn.execute("SELECT doc_no, revision, status, check_result FROM documents WHERE product_supplier_id = ? AND kind = 'po'"
+                         " ORDER BY id DESC LIMIT 1", (r["ps_id"],)).fetchone()
+        quote = ('<span class="muted">견적 없음 — 5번 답장 분석 뒤</span>' if r["q_id"] is None else
+                 f'${r["unit_price_usd"]:g} · {e(r["incoterm"] or "인코텀즈 ?")} {e(r["incoterm_place"] or "(지정장소 미정)")}'
+                 f' · 최소 {num(r["min_qty"], "{:,}")}개 <span class="small muted">{e((r["q_at"] or "")[:10])}</span>')
+        po = ("–" if d is None else
+              f'{e(d["doc_no"])}{f"-R{d["revision"]}" if d["revision"] else ""} '
+              f'{DOC_STATUS.get(d["status"], e(d["status"]))} {DOC_CHECK.get(d["check_result"], "")}')
+        btn = ""
+        if SERVER["on"] and r["id"] not in seen:
+            seen.add(r["id"])
+            if po_ready(conn, r["id"]):
+                btn = (f'<button type="button" class="btn" data-act="documents" data-id="{r["id"]}" data-name="{e(r["name"])}">'
+                       f'{"다시 만들기" if d else "PO 초안 만들기"}</button>')
+            else:
+                btn = '<button type="button" class="btn" disabled title="견적이 있는 선정 공급처 줄 없음">PO 초안 만들기</button>'
+        out.append([f'#{r["id"]} {e(r["name"])}', e(STAGE_LABEL.get(r["stage"], r["stage"])), e(r["company"]), quote, po]
+                   + ([btn] if SERVER["on"] else []))
+    bar = ('<div class="discover-run"><button type="button" class="snew" data-act="documents" data-id="" data-name="조건에 맞는 품목 전부">'
+           '조건에 맞는 품목 전부</button><span class="muted small">PO가 없거나 마지막 PO 뒤에 견적·통관 판정이 바뀐 품목 · '
+           'LLM 비용 없음 · 슈퍼바이저도 6시간마다 확인</span></div>') if SERVER["on"] else ""
+    if not out:
+        return bar + ('<p class="empty">공급처를 선정(selected)한 협상·샘플 단계 품목이 없습니다 — '
+                      '5번에서 공급처를 선정하고 견적을 받으면 여기에 나옵니다.</p>')
+    return bar + table(["품목", "단계", "선정 공급처", "최신 견적", "최신 PO", *(["작업"] if SERVER["on"] else [])], out)
+
+
 def document_rows(conn):
     """6번 서류 (최신 판 위주: 이전 판은 접어 둠)."""
     rows = conn.execute("""SELECT d.*, p.name, s.company FROM documents d JOIN products p ON p.id = d.product_id
@@ -1156,7 +1199,11 @@ def document_rows(conn):
                     num(r["qty"], "{:,}") + (f' <span class="small muted">({e(r["qty_source"])})</span>' if r["qty_source"] else ""),
                     num(r["total_usd"], "${:,.2f}"),
                     DOC_CHECK.get(r["check_result"], "–") + (f'<div class="small">{clip(msgs, 80)}</div>' if msgs else ""),
-                    DOC_STATUS.get(r["status"], e(r["status"])), e((r["created_at"] or "")[:16])])
+                    DOC_STATUS.get(r["status"], e(r["status"]))
+                    + (f'<div class="small muted" title="승인은 사람이 터미널에서 직접 (에이전트·대시보드로는 안 됨)">승인: '
+                       f'<code>cd trade_docs_agent &amp;&amp; python scripts/tradedocs.py approve deals/HUB-P{r["product_id"]}-S{r["product_supplier_id"]}.json</code></div>'
+                       if r["status"] == "draft" and r["check_result"] != "error" and r["product_supplier_id"] else ""),
+                    e((r["created_at"] or "")[:16])])
     return table(["품목", "공급처", "종류", "번호", "수량", "금액", "검증", "상태", "만든 때"], out)
 
 
@@ -1576,7 +1623,8 @@ def agent_body(conn, agent):
         return [section("공급처별 메일·견적", html, f"{n}개 품목 · {hint}"),
                 section("발송·견적 검토 할 일", tasks_of(conn, ["send_message", "review_quote"]))]
     if agent == "documents":
-        return [section("서류 목록", document_rows(conn), "6번 trade_docs_agent · 승인은 6번 approve(파일 해시 확인)로만"),
+        return [section("PO 초안 대상", po_targets(conn), "협상·샘플 단계 · 선정(selected) 공급처 줄 · 발송·결제·단계 변경 안 함"),
+                section("서류 목록", document_rows(conn), "6번 trade_docs_agent · 승인은 6번 approve(파일 해시 확인)로만"),
                 section("서류 할 일", tasks_of(conn, ["document"]))]
     if agent == "compliance":
         return [(compliance_run_bar() if SERVER["on"] else "")
@@ -1738,6 +1786,10 @@ document.addEventListener("click", function (ev) {
     var who = b.dataset.id ? "#" + b.dataset.id + " " + b.dataset.name : "공급처 발굴·협상 단계 품목 전체";
     if (!confirm(who + "\\n3번 통관·규제 점검을 다시 할까요? [" + ol + "] (품목당 30초~1분 · LLM API 비용)")) return;
     startJob("/api/compliance", b.dataset.id ? {product_id: Number(b.dataset.id), official: official} : {official: official});
+  } else if (b.dataset.act === "documents") {
+    var whoD = b.dataset.id ? "#" + b.dataset.id + " " + b.dataset.name : "조건에 맞는 품목 전부";
+    if (!confirm(whoD + "\\n6번으로 PO 초안(xlsx)을 만들까요? (LLM 비용 없음 · 발송·결제·단계 변경 안 함 · 승인은 터미널에서 직접)")) return;
+    startJob("/api/documents", b.dataset.id ? {product_id: Number(b.dataset.id)} : {});
   } else if (b.dataset.act === "costing") {
     if (!confirm("#" + b.dataset.id + " " + b.dataset.name + "\\n원가를 4번으로 다시 계산할까요? " +
                  "(가격 있는 공급처 줄 전부 · LLM 비용 없음 · 결과는 4번 '공급처별 원가·마진')")) return;

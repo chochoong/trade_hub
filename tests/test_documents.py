@@ -90,3 +90,23 @@ def test_docs_output_is_servable_root():
     from trade_hub import server
     assert server.agent_spec("documents")[0] / "output" in server.allowed_roots() or \
         (server.agent_spec("documents")[0] / "output").resolve() in server.allowed_roots()
+
+
+def test_po_targets_and_approve_hint(conn, monkeypatch):
+    pid, ps = seed(conn)
+    monkeypatch.setitem(dashboard.SERVER, "on", True)
+    html = dashboard.po_targets(conn)
+    assert "견적 없음" in html and 'disabled title="견적이 있는 선정 공급처 줄 없음"' in html
+    with conn:
+        conn.execute("INSERT INTO quotes (product_supplier_id, unit_price_usd, min_qty, incoterm) VALUES (?, 2.1, 500, 'FOB')", (ps,))
+    html = dashboard.po_targets(conn)
+    assert f'data-act="documents" data-id="{pid}"' in html and "PO 초안 만들기" in html and "(지정장소 미정)" in html
+    assert 'data-act="documents" data-id=""' in html                                  # 조건에 맞는 품목 전부
+    with conn:
+        db.add_document(conn, "po", f"PO-HUB-P{pid}-S{ps}", pid, "output/x.xlsx", product_supplier_id=ps, check_result="warning")
+    html = dashboard.po_targets(conn)
+    assert "다시 만들기" in html and f"PO-HUB-P{pid}-S{ps}" in html
+    rows = dashboard.document_rows(conn)
+    assert f"approve deals/HUB-P{pid}-S{ps}.json" in rows
+    assert 'b.dataset.act === "documents"' in dashboard.SERVER_JS
+
