@@ -388,6 +388,24 @@ def test_costing_page_shows_supplier_and_listing_links(conn):
     assert "-80% 변형 혼합" in dashboard.costing_rows(conn)
 
 
+def test_competitive_evidence_skipped_for_listing_link_and_shown_as_badge(conn):
+    with conn:
+        pid = db.upsert_product(conn, "마우스", stage="sourcing")
+        sid = db.upsert_supplier(conn, "Mouse Co", "China", url="https://mouse.example.com")
+        ps = db.link_supplier(conn, pid, sid, unit_price_usd=5, evidence_json=[
+            {"claim": "경쟁 대비 요약 (우위 2 · 열위 1): 무게 가벼움", "url": "https://rival.example.com/m", "type": "competitive"},
+            {"claim": "경쟁 비교 [열위] 폴링레이트: 1000Hz vs 8000Hz", "url": "https://rival.example.com/m", "type": "competitive"},
+            {"claim": "판매가", "url": "https://mouse.example.com/item/9"}])
+        conn.execute("UPDATE product_suppliers SET est_landed_krw = 3000 WHERE id = ?", (ps,))
+    html = dashboard.costing_rows(conn)
+    assert 'href="https://mouse.example.com/item/9"' in html and "rival.example.com" not in html
+    badge = dashboard.competitive_badge(conn.execute("SELECT evidence_json FROM product_suppliers WHERE id = ?", (ps,)).fetchone()[0])
+    assert "경쟁 대비 우위 2 · 열위 1" in badge and 'class="small ok"' in badge
+    assert "폴링레이트" in badge and 'href="https://rival.example.com/m"' in badge
+    assert "경쟁 대비 우위 2 · 열위 1" in dashboard.products_in_progress(conn)[0]
+    assert dashboard.competitive_badge(None) == "" and dashboard.competitive_badge('[{"claim": "x"}]') == ""
+
+
 def test_pending_task_text_ending_with_path_not_treated_as_path(conn, tmp_path):
     rep = tmp_path / "broker_request.html"
     rep.write_text("x", encoding="utf-8")

@@ -601,6 +601,33 @@ def _md(at):
     return f"{at[5:7]}/{at[8:10]}" if at and len(at) >= 10 else ""
 
 
+COMP_SUMMARY = re.compile(r"우위\s*(\d+)\D+?열위\s*(\d+)")
+
+
+def competitive_badge(evidence_json):
+    """2번 evidence_json 의 type=competitive 중 claim 이 '경쟁 대비 요약'으로 시작하는 항목 → '경쟁 대비 우위 N · 열위 M' 배지.
+    title = 요약 + 개별 비교 항목. 경쟁 제품 링크는 요약 항목의 url."""
+    try:
+        ev = json.loads(evidence_json or "[]")
+    except (ValueError, TypeError):
+        return ""
+    comp = [x for x in ev if isinstance(ev, list) and isinstance(x, dict) and x.get("type") == "competitive"
+            and isinstance(x.get("claim"), str)] if isinstance(ev, list) else []
+    summ = next((x for x in comp if x["claim"].strip().startswith("경쟁 대비 요약")), None)
+    if summ is None:
+        return ""
+    m = COMP_SUMMARY.search(summ["claim"])
+    w, l = (int(m.group(1)), int(m.group(2))) if m else (None, None)
+    label = f"경쟁 대비 우위 {w} · 열위 {l}" if m else "경쟁 대비"
+    cls = "" if not m else (" ok" if w > l else " warn" if l > w else "")
+    tip = "\n".join([summ["claim"].strip()] + [x["claim"].strip() for x in comp if x is not summ])
+    out = f'<div class="small{cls}" title="{e(tip)}">{e(label)}</div>'
+    u = summ.get("url")
+    if isinstance(u, str) and u.lower().startswith(("http://", "https://")):
+        out = out[:-6] + f' {web_link(u, "경쟁 제품 ↗")}</div>'
+    return out
+
+
 def supplier_row(s, report_html, ranks, latest_run=None, p=None, ctx=None):
     """latest_run = 이 구매 방식 그룹의 최신 2번 실행 번호 — 그보다 예전 조사에서 나온 줄은 조사 날짜를 흐리게."""
     rank = ranks.get(s["link_id"])
@@ -623,7 +650,7 @@ def supplier_row(s, report_html, ranks, latest_run=None, p=None, ctx=None):
         f'{" · " + num(s["years_in_business"], "{:g}년") if s["years_in_business"] else ""}'
         f'{" · " + site if site else ""}</div>{badge}</div></div>',
         f'<span class="trust t{e(s["trust"])}">{e(s["trust"] or "–")}</span> <span class="small">{e(supplier_score(s))}</span>'
-        + (f'<div class="small">{clip(reason, 60)}</div>' if reason else "") + seen,
+        + (f'<div class="small">{clip(reason, 60)}</div>' if reason else "") + competitive_badge(_field(s, "evidence_json")) + seen,
         e(s["status"]), f'{moq_badge(s)}<div>{clip(s["moq"], 30)}</div>', clip(s["price_note"] or num(s["unit_price_usd"], "${:g}"), 50),
         *(channel_cells(s, p, ctx or {}) if p is not None else [""] * len(CHANNEL_COLS)),
         contact or '<span class="muted">–</span>',
@@ -642,7 +669,7 @@ def products_in_progress(conn):
         sups = conn.execute("""
             SELECT s.*, ps.id AS link_id, ps.image_url AS sup_image, ps.status, ps.is_top_pick, ps.moq, ps.price_note, ps.unit_price_usd, ps.run_id,
                    ps.score AS ps_score, ps.grade AS ps_grade, ps.purchase_mode AS ps_mode, ps.max_order_qty AS ps_max_qty,
-                   ps.channel_prices_json, COALESCE(ar.finished_at, ar.started_at) AS ps_researched_at
+                   ps.channel_prices_json, ps.evidence_json, COALESCE(ar.finished_at, ar.started_at) AS ps_researched_at
             FROM product_suppliers ps JOIN suppliers s ON s.id = ps.supplier_id
             LEFT JOIN agent_runs ar ON ar.id = ps.run_id   -- 조사 날짜 = 그 줄을 만든 2번 실행 (ps.updated_at은 다른 에이전트도 바꿈)
             WHERE ps.product_id = ? ORDER BY ps.is_top_pick DESC, ps.id""", (p["id"],)).fetchall()
@@ -1262,6 +1289,7 @@ def costing_rows(conn):
         except ValueError:
             ev = []
         item = next((x.get("url") for x in ev if isinstance(x, dict) and isinstance(x.get("url"), str)
+                     and x.get("type") != "competitive"      # 2번 경쟁 비교 근거 = 경쟁 제품 주소일 수 있음
                      and x["url"].lower().startswith(("http://", "https://")) and x["url"] != r["url"]), None)
         links.append(web_link(item, "판매 페이지 ↗"))
         tags = ('<span class="pick">추천</span> ' if r["is_top_pick"] else "") + (
