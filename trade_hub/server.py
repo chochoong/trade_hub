@@ -87,15 +87,16 @@ def job_command(kind, arg):
         cwd, python, timeout = agent_spec("discover")
         return [python, "supplier_agent.py", "--count", str(DISCOVER_COUNT), "--no-open"] + (
             ["--hint", arg] if arg else []), cwd, timeout
-    if kind == "sourcing":                  # arg = (품목 번호, 구매 방식[, 국가]) — select가 검증한 값
-        pid, mode, country = (*arg, None)[:3] if isinstance(arg, tuple) else (arg, "small_batch", None)
+    if kind == "sourcing":                  # arg = (품목 번호, 구매 방식[, 국가[, 옵션]]) — select가 검증한 값
+        pid, mode, country, opts = (*arg, None, None)[:4] if isinstance(arg, tuple) else (arg, "small_batch", None, None)
         if mode not in PURCHASE_MODES:
             raise ValueError(f"구매 방식: {mode!r}")
         if country is not None and country not in COUNTRIES:
             raise ValueError(f"국가: {country!r}")
         cwd, python, timeout = agent_spec("sourcing")
         cmd = [python, "-m", "sourcing_agent", "from-db", str(int(pid)), "--type", mode]
-        return cmd + (["--country", country] if country else []), cwd, timeout   # 없으면 2번이 1번 추천 국가로
+        cmd += ["--country", country] if country else []   # 없으면 2번이 1번 추천 국가로
+        return cmd + sourcing_opt_args(sourcing_opts(opts or {})), cwd, timeout
     if kind == "buysearch":                 # 구매대행: arg = (검색어, 카테고리[, 사이트]) — buy_search가 검증한 값
         q, cat, market = (*arg, "rakuten")[:3]
         if market not in BUY_MARKETS:
@@ -401,6 +402,39 @@ def discover(conn, body):
     return 200, job_view(start_job("discover", hint, label, anchor="a1"))
 
 
+SOURCING_NOTE_MAX = 500
+
+
+def sourcing_opts(raw):
+    """'다시 찾기' 옵션 검증 → {"cheaper": bool, "new_only": bool, "max_price": float|None, "note": str}.
+    잘못된 값이면 ValueError(사용자에게 보여 줄 문구)."""
+    if not isinstance(raw, dict):
+        raise ValueError("옵션 형식이 올바르지 않습니다.")
+    mp = raw.get("max_price")
+    if mp in (None, ""):
+        mp = None
+    else:
+        try:
+            mp = float(mp)
+        except (TypeError, ValueError):
+            raise ValueError("단가 상한은 숫자(USD)여야 합니다.") from None
+        if not (mp > 0 and mp < 1e7):
+            raise ValueError("단가 상한은 0보다 큰 숫자(USD)여야 합니다.")
+    note = raw.get("note") or ""
+    if not isinstance(note, str):
+        raise ValueError("추가 조건은 글이어야 합니다.")
+    note = " ".join(note.split())                  # 줄바꿈·제어 문자 없이 한 줄
+    if len(note) > SOURCING_NOTE_MAX:
+        raise ValueError(f"추가 조건은 {SOURCING_NOTE_MAX}자 이내로 적어 주세요.")
+    return {"cheaper": raw.get("cheaper") is True, "new_only": raw.get("new_only") is True, "max_price": mp, "note": note}
+
+
+def sourcing_opt_args(o):
+    """검증한 옵션 → 2번 from-db 인자 (리스트로 넘김 · 셸 해석 없음). 옵션이 없으면 []."""
+    return ((["--cheaper"] if o.get("cheaper") else []) + (["--max-price", f'{o["max_price"]:g}'] if o.get("max_price") else [])
+            + (["--new-only"] if o.get("new_only") else []) + (["--note", o["note"]] if o.get("note") else []))
+
+
 def select(conn, body):
     try:
         pid = int(body.get("product_id"))
@@ -417,6 +451,10 @@ def select(conn, body):
         return 400, {"error": f"국가는 {', '.join(COUNTRIES)} 중 하나여야 합니다."}
     if row["stage"] not in ("candidate", "sourcing"):
         return 400, {"error": f"#{pid}는 이미 {dashboard.STAGE_LABEL.get(row['stage'], row['stage'])} 단계입니다."}
+    try:
+        opts = sourcing_opts(body.get("options") or {})
+    except ValueError as err:
+        return 400, {"error": str(err)}
     if mode == "oem" and row["stage"] == "candidate":   # 대량은 구매대행·소량으로 검증한 뒤 (2번 공급처 발굴 카드에서만)
         return 400, {"error": "대량 사입·OEM은 공급처 발굴 단계 품목에서만 찾을 수 있습니다 (소량으로 먼저 검증)."}
     reason = sourcing_busy_reason(conn, pid, mode)
@@ -425,8 +463,11 @@ def select(conn, body):
     if row["stage"] == "candidate":           # 사람이 버튼으로 결정 → 단계 이동 (trade_hub select와 같음)
         with conn:
             db.set_stage(conn, pid, "sourcing", note="사람이 선정 → 공급처 발굴로 (대시보드)")
-    job = start_job("sourcing", (pid, mode, country),
-                    f"2번 {PURCHASE_MODES[mode]}용 공급처 찾기 ({COUNTRIES[country]}): #{pid} {row['name']}",
+    extra = [x for x in ("더 싼 곳만" if opts["cheaper"] else "", f'단가 ≤ ${opts["max_price"]:g}' if opts["max_price"] else "",
+                         "새 공급처만" if opts["new_only"] else "", "추가 조건" if opts["note"] else "") if x]
+    job = start_job("sourcing", (pid, mode, country) + ((opts,) if any(opts.values()) else ()),   # 옵션 없으면 지금과 같은 인자
+                    f"2번 {PURCHASE_MODES[mode]}용 공급처 찾기 ({COUNTRIES[country]}"
+                    f"{' · ' + ' · '.join(extra) if extra else ''}): #{pid} {row['name']}",
                     product_id=pid, key=(pid, mode))
     if row["stage"] == "candidate":
         job["revert_stage"] = pid             # 중지하면 후보로 되돌릴 품목

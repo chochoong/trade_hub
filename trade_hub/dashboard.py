@@ -410,7 +410,13 @@ def sourcing_button(p, modes_found):
     return ' <span class="acts">' + country_select(p) + "".join(
         f'<button type="button" class="btn{"" if mode in modes_found else " primary"}" data-act="select" data-id="{p["id"]}" '
         f'data-name="{name}" data-mode="{mode}" data-mode-label="{label}">{label}용 {"다시 " if mode in modes_found else ""}찾기</button>'
-        for mode, label in SOURCING_BUTTONS) + "</span>"
+        for mode, label in SOURCING_BUTTONS) + (
+        '<details class="srch-opt small"><summary>찾기 옵션</summary>'
+        '<label title="같은 구매 방식으로 이미 찾은 곳의 최저 단가보다 싼 곳만"><input type="checkbox" name="cheaper"> 더 싼 곳만</label> '
+        '<label title="이미 저장된 업체는 빼고"><input type="checkbox" name="new_only"> 새 공급처만</label> '
+        '<label>단가 상한 USD <input type="number" name="max_price" min="0.01" step="0.01" style="width:80px"></label> '
+        '<label>추가 조건 <input name="note" maxlength="500" placeholder="예: 무브랜드 OEM 위주" style="width:240px"></label>'
+        '<div class="muted">옵션은 위 버튼으로 찾을 때 함께 넘어갑니다 · 상세 검증 8곳이라 10~15분</div></details>') + "</span>"
 
 
 def product_index(conn):
@@ -1869,8 +1875,17 @@ document.addEventListener("click", function (ev) {
     var mode = b.dataset.mode || "small_batch", ml = b.dataset.modeLabel || "소량 사입";
     var cs = b.parentNode.querySelector("select.country"), country = cs ? cs.value : "China";
     ml += " · " + (cs ? cs.options[cs.selectedIndex].text : "중국");
-    if (!confirm("#" + b.dataset.id + " " + b.dataset.name + "\\n[" + ml + "] 방식으로 공급처를 찾을까요? 공급처 발굴 단계로 넘기고 2번 에이전트를 실행합니다. (5~10분 · API 비용)")) return;
-    startJob("/api/select", {product_id: Number(b.dataset.id), mode: mode, country: country});
+    var ob = b.parentNode.querySelector(".srch-opt"), opts = {}, ol = [];
+    if (ob) {
+      var q = function (n) { return ob.querySelector('[name="' + n + '"]'); };
+      if (q("cheaper").checked) { opts.cheaper = true; ol.push("더 싼 곳만"); }
+      if (q("new_only").checked) { opts.new_only = true; ol.push("새 공급처만"); }
+      if (q("max_price").value) { opts.max_price = q("max_price").value; ol.push("단가 ≤ $" + q("max_price").value); }
+      if (q("note").value.trim()) { opts.note = q("note").value.trim(); ol.push("추가 조건: " + opts.note); }
+    }
+    if (ol.length) ml += " · " + ol.join(" · ");
+    if (!confirm("#" + b.dataset.id + " " + b.dataset.name + "\\n[" + ml + "] 방식으로 공급처를 찾을까요? 공급처 발굴 단계로 넘기고 2번 에이전트를 실행합니다. (10~15분 · API 비용)")) return;
+    startJob("/api/select", {product_id: Number(b.dataset.id), mode: mode, country: country, options: opts});
   } else if (b.dataset.act === "compliance") {
     var os = document.getElementById("compliance-official"), official = os ? os.value : "api";
     var ol = os ? os.options[os.selectedIndex].text : "공식 대조: 파일 + 세관장확인 API";

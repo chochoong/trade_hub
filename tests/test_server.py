@@ -634,3 +634,22 @@ def test_supplier_page_shows_full_red_flags(srv, conn):
     assert "나" * 100 in html and "샘플 가능 여부" in html and "경쟁 비교" in html
     assert f'href="/supplier?id={ps}"' in call(srv + "/")[1]
     assert call(f"{srv}/supplier?id=99999")[0] == 404 and call(f"{srv}/supplier?id=x")[0] == 404
+
+
+def test_sourcing_options_validated_and_passed_as_args(srv, conn):
+    real = ORIGINAL_JOB_COMMAND
+    cmd, _, _ = real("sourcing", (21, "oem", None))
+    assert cmd[-4:] == ["from-db", "21", "--type", "oem"]                     # 옵션 없으면 지금과 같은 명령
+    opts = server.sourcing_opts({"cheaper": True, "new_only": True, "max_price": "3.5", "note": '무브랜드; rm -rf "x"\nOEM'})
+    cmd, _, _ = real("sourcing", (21, "oem", "China", opts))
+    assert cmd[cmd.index("--country"):] == ["--country", "China", "--cheaper", "--max-price", "3.5", "--new-only",
+                                            "--note", '무브랜드; rm -rf "x" OEM']   # 리스트 인자 · 한 줄
+    for bad in ({"max_price": "-1"}, {"max_price": "abc"}, {"max_price": "0"}, {"note": "가" * 501}, {"note": 5}):
+        with pytest.raises(ValueError):
+            server.sourcing_opts(bad)
+    assert server.sourcing_opt_args(server.sourcing_opts({"cheaper": "yes"})) == []   # true 만 켬
+    with conn:
+        pid = db.upsert_product(conn, "옵션 품목", stage="sourcing")
+    assert call(srv + "/api/select", {"product_id": pid, "options": {"max_price": "x"}})[0] == 400
+    code, job = call(srv + "/api/select", {"product_id": pid, "options": {"cheaper": True, "max_price": 2}})
+    assert code == 200 and "더 싼 곳만 · 단가 ≤ $2" in job["label"]
