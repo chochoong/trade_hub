@@ -481,6 +481,53 @@ def _naver_kw(p):
     return (kws[0] if isinstance(kws, list) and kws and isinstance(kws[0], str) else "") or p["name"]
 
 
+def _man(krw):
+    """1,786,680 → '179만원'"""
+    return f"{krw / 10000:,.0f}만원" if isinstance(krw, (int, float)) else "?"
+
+
+def _won(v, sign=False):
+    return (f"{v:+,.0f}원" if sign else f"{v:,.0f}원") if isinstance(v, (int, float)) else "–"
+
+
+def qty_block(cp):
+    """스마트스토어 칸 아래 '이익 최대 수량' (4번 channel_prices_json best_qty·min_target_qty·by_qty).
+    이익·마진은 1번 예상 판매가(price_krw) 기준 · 부가세 제외 · 필요 자금(cash)엔 수입 부가세 포함. 판매가가 없으면 키가 없음."""
+    if "best_qty" not in cp and "by_qty" not in cp:
+        return ""
+    price, cap = cp.get("price_krw"), cp.get("max_cash_krw")
+    basis = (f"판매가 {_won(price)}(1번 예상 판매가) 기준 · 부가세 제외 · 필요 자금은 수입 부가세 포함"
+             + (f" · 자금 한도 {_man(cap)}" if isinstance(cap, (int, float)) else ""))
+    best, out = cp.get("best_qty"), ""
+    if isinstance(best, dict):
+        out += (f'<div class="small" title="{e(basis)}"><b>이익 최대 {best.get("qty", "?"):,}개</b> · 개당 '
+                f'{_won(best.get("unit_profit_krw"), True)} · 총 {_won(best.get("total_profit_krw"), True)} '
+                f'(자금 {_man(best.get("cash_krw"))})</div>')
+    elif cp.get("best_none_reason") == "no_profit":
+        out += f'<div class="small" title="{e(basis)}"><span class="bad">어떤 수량도 손해</span></div>'
+    elif cp.get("best_none_reason") == "over_cash":
+        out += (f'<div class="small" title="{e(basis)}"><span class="warn">자금 한도'
+                + (f" {_man(cap)}" if isinstance(cap, (int, float)) else "") + " 안에서 살 수 있는 수량 없음</span></div>")
+    mt, tm = cp.get("min_target_qty"), cp.get("target_margin_pct")
+    if isinstance(mt, (int, float)):
+        out += f'<div class="small muted">목표 마진 {tm if tm is not None else "?"}%는 {mt:,.0f}개부터</div>'
+    rows = [r for r in cp.get("by_qty") or [] if isinstance(r, dict)]
+    if rows:
+        bq = best.get("qty") if isinstance(best, dict) else None
+        trs = "".join(
+            f'<tr class="{"" if not (isinstance(cap, (int, float)) and isinstance(r.get("cash_krw"), (int, float)) and r["cash_krw"] > cap) else "muted"}">'
+            + "".join(f"<td>{x}</td>" for x in (
+                (f'<b>{r.get("qty", "?"):,}</b>' if r.get("qty") == bq else f'{r.get("qty", "?"):,}'),
+                _won(r.get("landed_krw")), _won(r.get("unit_profit_krw"), True), _won(r.get("total_profit_krw"), True),
+                _man(r.get("cash_krw")), f'{r["margin_pct"]:g}%' if isinstance(r.get("margin_pct"), (int, float)) else "–"))
+            + "</tr>" for r in rows)
+        out += (f'<details class="small"><summary>수량별 이익 ({len(rows)})</summary>'
+                f'<div class="muted">{e(basis)} · 흐린 줄 = 자금 한도 초과</div>'
+                '<table class="tight"><thead><tr><th>수량</th><th>개당 원가</th><th>개당 이익</th><th>총이익</th>'
+                f'<th>자금</th><th>마진</th></tr></thead><tbody>{trs}</tbody></table></details>')
+    return out
+
+
 def channel_cells(s, p, ctx):
     """공급처 줄의 마켓별 권장가 (CHANNEL_COLS) (4번 channel_prices_json — 원가 기준 계산값, 시장 가격 아님).
     스마트스토어 칸 아래 네이버 최저가 링크 + (buyagent에 사람이 적은 최저가가 있으면) 권장가 비교."""
@@ -516,6 +563,8 @@ def channel_cells(s, p, ctx):
                 cell += (f'<div class="small" title="1번 예상 판매가 {retail:,.0f}원">1번 판매가보다 '
                          + (f'<span class="warn">{d:.0%} 높음</span>' if d > 0.005 else
                             f'<span class="ok">{-d:.0%} 낮음</span>' if d < -0.005 else "같음") + "</div>")
+        if key == "smartstore":
+            cell += qty_block(cp)
         if key == "smartstore" and ctx.get("nl"):
             nl, row = ctx["nl"], ctx["by_hub"].get(p["id"])
             kw = nl.link_keyword(row) if row else _naver_kw(p)

@@ -67,3 +67,19 @@ def test_channel_dash_reasons():
     assert "4번 원가 계산 전" in dashboard.channel_cells(row(None), p, {})[0]
     c = dashboard.channel_cells(row({"smartstore": {"target_krw": None, "walk_krw": None}, "qty": 5}), p, {})
     assert len(c) == 1 and "100% 이상" in c[0]                               # 쿠팡 칸은 뺌
+
+
+def test_best_qty_block():
+    row = {"qty": 200, "landed_krw": 8135, "unit_profit_krw": 4839, "total_profit_krw": 967778, "cash_krw": 1786680, "margin_pct": 25.5}
+    big = {"qty": 500, "landed_krw": 7000, "unit_profit_krw": 5000, "total_profit_krw": 2500000, "cash_krw": 3900000, "margin_pct": 30.0}
+    cp = {"best_qty": row, "best_none_reason": None, "min_target_qty": 120, "target_margin_pct": 25, "price_krw": 20900,
+          "max_cash_krw": 2000000, "by_qty": [row, big]}
+    h = dashboard.qty_block(cp)
+    assert "<b>이익 최대 200개</b> · 개당 +4,839원 · 총 +967,778원 (자금 179만원)" in h
+    assert "목표 마진 25%는 120개부터" in h and "수량별 이익 (2)" in h and "<td><b>200</b></td>" in h
+    assert '<tr class="muted"><td>500</td>' in h and "판매가 20,900원(1번 예상 판매가) 기준" in h
+    nop = dashboard.qty_block({**cp, "best_qty": None, "best_none_reason": "no_profit", "min_target_qty": None})
+    assert '<span class="bad">어떤 수량도 손해</span>' in nop and "목표 마진" not in nop
+    over = dashboard.qty_block({**cp, "best_qty": None, "best_none_reason": "over_cash"})
+    assert "자금 한도 200만원 안에서 살 수 있는 수량 없음" in over and "어떤 수량도 손해" not in over
+    assert dashboard.qty_block({"smartstore": {"target_krw": 1}, "qty": 50}) == ""             # 판매가 없음 → 키 없음
