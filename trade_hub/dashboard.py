@@ -662,8 +662,58 @@ def supplier_row(s, report_html, ranks, latest_run=None, p=None, ctx=None):
         e(s["status"]), f'{moq_badge(s)}<div>{clip(s["moq"], 30)}</div>', clip(s["price_note"] or num(s["unit_price_usd"], "${:g}"), 50),
         *(channel_cells(s, p, ctx or {}) if p is not None else [""] * len(CHANNEL_COLS)),
         contact or '<span class="muted">–</span>',
-        clip(s["red_flags"], 90, rep, sep=", "),
+        clip(s["red_flags"], 90, " ".join(x for x in (
+            f'<a class="small" href="/supplier?id={s["link_id"]}" target="_blank" title="위험 요소·신뢰도 사유·근거 전체를 새 탭 한 페이지로">'
+            '전체 페이지 ↗</a>' if SERVER["on"] else "", rep) if x), sep=", "),
     ]
+
+
+def _json_list(raw):
+    try:
+        v = json.loads(raw or "[]")
+    except (ValueError, TypeError):
+        return []
+    return v if isinstance(v, list) else []
+
+
+def supplier_page(conn, ps_id):
+    """GET /supplier?id=<product_suppliers.id>: 2번 공급처 한 줄의 위험 요소·신뢰도 사유·확인 못한 항목·근거를 자르지 않고 한 페이지로.
+    없는 번호면 None."""
+    s = conn.execute("""SELECT s.*, ps.id AS link_id, ps.status AS ps_status, ps.score, ps.grade, ps.moq AS ps_moq, ps.price_note,
+                               ps.unit_price_usd, ps.evidence_json, ps.unverified_json, p.id AS pid, p.name AS pname
+                        FROM product_suppliers ps JOIN suppliers s ON s.id = ps.supplier_id JOIN products p ON p.id = ps.product_id
+                        WHERE ps.id = ?""", (ps_id,)).fetchone()
+    if s is None:
+        return None
+    flags = [x.strip() for x in (s["red_flags"] or "").split(", ") if x.strip()]
+    reason = s["trust_reason"] or ""
+    unver = [x for x in _json_list(s["unverified_json"]) if isinstance(x, str) and x.strip()]
+    ev = [x for x in _json_list(s["evidence_json"]) if isinstance(x, dict) and str(x.get("claim") or "").strip()]
+
+    def ul(items, empty="없음"):
+        return ("<ul>" + "".join(f"<li>{x}</li>" for x in items) + "</ul>") if items else f'<p class="muted">{empty}</p>'
+
+    def ev_item(x):
+        tag = '<span class="small warn">경쟁 비교</span> ' if x.get("type") == "competitive" else ""
+        u = x.get("url")
+        return tag + e(x["claim"]) + (f' <span class="small">{web_link(u, "근거 ↗")}</span>' if isinstance(u, str) and u else "")
+
+    site = web_link(s["url"], "업체 페이지 ↗")
+    score = (f'{s["score"]:g}점' + (f' ({e(s["grade"])})' if s["grade"] else "")) if s["score"] is not None else ""
+    price = e(s["price_note"] or (f'${s["unit_price_usd"]:g}' if s["unit_price_usd"] is not None else "–"))
+    body = f"""<h1>{e(s["company"])}</h1>
+<p class="muted">#{s["pid"]} {e(s["pname"])} · 공급처 줄 {s["link_id"]} · {e(s["country"] or "")} · {e(s["type"] or "")} · 상태 {e(s["ps_status"] or "")}{" · " + site if site else ""}</p>
+<p>신뢰도 <span class="trust t{e(s["trust"])}">{e(s["trust"] or "–")}</span> {score} · MOQ {e(s["ps_moq"] or "–")} · 단가 {price}</p>
+<div class="card"><h2>위험 요소 ({len(flags)})</h2>{ul([e(x) for x in flags])}</div>
+<div class="card"><h2>신뢰도 사유</h2>{f'<p class="long">{e(reason)}</p>' if reason else '<p class="muted">없음</p>'}</div>
+<div class="card"><h2>확인하지 못한 항목 ({len(unver)})</h2>{ul([e(x) for x in unver])}</div>
+<div class="card"><h2>근거 ({len(ev)})</h2>{ul([ev_item(x) for x in ev])}</div>"""
+    return f"""<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{e(s["company"])} — 위험 요소</title><style>{CSS}
+.sp{{max-width:860px;margin:24px auto;padding:0 16px}}.sp h1{{font-size:22px;margin:0 0 4px}}.sp h2{{font-size:16px;margin:0 0 8px}}
+.sp .card{{margin:12px 0;padding:14px 16px}}.sp li{{margin:4px 0;line-height:1.5}}</style></head>
+<body><div class="sp">{body}</div></body></html>"""
 
 
 def products_in_progress(conn):

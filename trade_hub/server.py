@@ -815,6 +815,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, jobs)
             if url.path == "/file":
                 return self._file((qs.get("p") or [""])[0])
+            if url.path == "/supplier":         # 2번 공급처 한 줄 전체 (위험 요소·신뢰도 사유·근거)
+                try:
+                    page = dashboard.supplier_page(conn, int((qs.get("id") or [""])[0]))
+                except ValueError:
+                    page = None
+                if page is None:
+                    return self._send(404, {"error": "없는 공급처 줄"})
+                return self._send(200, page, "text/html; charset=utf-8")
             return self._send(404, {"error": "없는 주소"})
         finally:
             conn.close()

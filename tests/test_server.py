@@ -620,3 +620,17 @@ def test_documents_route_validates_and_runs(srv, conn, monkeypatch):
     assert call(srv + "/api/documents", {"product_id": bare})[0] == 400
     assert call(srv + "/api/documents", {"product_id": "x"})[0] == 400
     assert call(srv + "/api/documents", {"product_id": 9999})[0] == 404
+
+
+def test_supplier_page_shows_full_red_flags(srv, conn):
+    with conn:
+        pid = db.upsert_product(conn, "선반", stage="sourcing")
+        sid = db.upsert_supplier(conn, "Shelf Co", "China", red_flags="결제 조건 불명확, " + "가" * 120 + ", 인증 없음",
+                                 trust_reason="이유 " + "나" * 100)
+        ps = db.link_supplier(conn, pid, sid, unit_price_usd=3, unverified_json=["샘플 가능 여부"],
+                              evidence_json=[{"claim": "경쟁 대비 요약 (우위 1 · 열위 0)", "url": "https://r.example.com", "type": "competitive"}])
+    st, html = call(f"{srv}/supplier?id={ps}")
+    assert st == 200 and "위험 요소 (3)" in html and "<li>인증 없음</li>" in html and "가" * 120 in html
+    assert "나" * 100 in html and "샘플 가능 여부" in html and "경쟁 비교" in html
+    assert f'href="/supplier?id={ps}"' in call(srv + "/")[1]
+    assert call(f"{srv}/supplier?id=99999")[0] == 404 and call(f"{srv}/supplier?id=x")[0] == 404
