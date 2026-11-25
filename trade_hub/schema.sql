@@ -6,7 +6,7 @@
 --  sourcing    2. 공급처 발굴              → suppliers, product_suppliers
 --  compliance  3. 통관·규제 체크            → compliance_checks(supplier_questions 포함), tasks(decision: 보류 판정·관세사 문의 준비)
 --                                          (products.hs_code·duty_rate·fta_note는 관세사 확인 후 사람이 입력 — 에이전트는 후보만)
---  costing     4. 원가·수익 계산            → product_suppliers.est_landed_krw·est_margin_pct, tasks(decision: 포기선 마진 미달 / other: 협상 기준 반영)
+--  costing     4. 원가·수익 계산            → product_suppliers.est_landed_krw·est_margin_pct·channel_prices_json, tasks(decision: 포기선 마진 미달 / other: 협상 기준 반영)
 --                                          (목표가·포기 가격은 공용 DB에 쓰지 않음 — cost_agent/output/hub 보고서에만)
 --  negotiation 5. 커뮤니케이션·협상         → messages(초안), quotes, product_suppliers.supplier_specs_json
 --  documents   6. 무역서류                 → documents(서류 번호·개정판·해시·승인 상태 [v18]), tasks(document: 'PO 초안 검토: <품목>')
@@ -151,6 +151,10 @@ CREATE TABLE IF NOT EXISTS product_suppliers (
     price_note       TEXT,
     est_landed_krw   INTEGER,                 -- 스크립트가 계산한 개당 원가
     est_margin_pct   REAL,
+    channel_prices_json TEXT CHECK (channel_prices_json IS NULL OR json_valid(channel_prices_json)),   -- 4번 마켓별 판매가 (KRW만) [v19]
+                                              --   {"coupang": {"target_krw": 11900, "walk_krw": 9800}, "smartstore": {...},
+                                              --    "qty": 100, "landed_krw": 5230, "updated_at": "..."} — target = 목표 마진 판매가(권장가),
+                                              --   walk = 최소 마진 판매가. 목표가·포기 가격(USD)은 넣지 않음 (4번 로컬 보고서에만)
     image_url        TEXT,                    -- 이 공급사가 제공한 상품 사진 (URL 또는 상대경로)  [v3]
     -- 2번이 '이 품목 기준으로' 평가한 결과 (같은 업체라도 품목마다 다름)  [v4]
     score                 REAL,               -- 총점 (100점 만점, 위험 감점 반영)

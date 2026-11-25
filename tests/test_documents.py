@@ -68,7 +68,7 @@ def test_v17_db_gets_documents_and_incoterm_place(tmp_path, monkeypatch):
     try:
         assert "incoterm_place" in [r[1] for r in c.execute("PRAGMA table_info(quotes)")]
         assert c.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 0
-        assert c.execute("PRAGMA user_version").fetchone()[0] == 18
+        assert c.execute("PRAGMA user_version").fetchone()[0] == db.SCHEMA_VERSION
     finally:
         c.close()
 

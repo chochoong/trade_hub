@@ -26,7 +26,7 @@ from pathlib import Path
 
 PKG_DIR = Path(__file__).resolve().parent
 SCHEMA_PATH = PKG_DIR / "schema.sql"
-SCHEMA_VERSION = 18  # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
+SCHEMA_VERSION = 19  # 스키마를 바꾸면 올리고, MIGRATIONS에 추가한 컬럼을 적을 것 (컬럼 추가만 허용)
 # 버전별로 추가된 컬럼: 예전 DB에는 connect() 때 ALTER TABLE로 붙인다 (새 DB는 schema.sql에 이미 있음)
 
 
@@ -62,7 +62,8 @@ MIGRATIONS = {
     16: [("compliance_checks", "basis_ps_id",        # 3번 판정에 쓴 대표 공급처 줄 (공급처 선정이 바뀌면 다시 점검)
           "INTEGER REFERENCES product_suppliers(id) ON DELETE SET NULL")],
     17: [("compliance_checks", "duty_estimate_json", _json_col("duty_estimate_json"))],   # 3번 HS 후보 관세율 참고값 (관세사 확인값 아님)
-    18: [("quotes", "incoterm_place", "TEXT")],   # 인코텀즈 지정장소 (5번이 답장에서) — documents 표는 schema.sql CREATE IF NOT EXISTS로 생김
+    18: [("quotes", "incoterm_place", "TEXT")],
+    19: [("product_suppliers", "channel_prices_json", _json_col("channel_prices_json"))],   # 4번 마켓별 판매가 (KRW)   # 인코텀즈 지정장소 (5번이 답장에서) — documents 표는 schema.sql CREATE IF NOT EXISTS로 생김
 }
 PS_UNIQUE_INDEX = ("CREATE UNIQUE INDEX IF NOT EXISTS ux_ps_product_supplier_mode "
                    "ON product_suppliers(product_id, supplier_id, COALESCE(purchase_mode, ''))")
@@ -322,7 +323,8 @@ LINK_FIELDS = {"is_top_pick", "moq", "unit_price_usd", "price_note", "est_landed
                # v4: 2번이 이 품목 기준으로 평가한 결과. *_json 필드는 list/dict를 그대로 넘기면 JSON으로 저장
                "score", "grade", "score_detail_json", "purchase_mode", "trade_terms_json", "first_questions_json",
                "unverified_json", "evidence_json", "max_order_qty",
-               "specs_json"}   # v13: 제품 사양 {"flags": {...}, "materials": [...], "evidence": [...]}
+               "specs_json",   # v13: 제품 사양 {"flags": {...}, "materials": [...], "evidence": [...]}
+               "channel_prices_json"}   # v19: 4번 마켓별 판매가 {"coupang": {"target_krw", "walk_krw"}, "smartstore": ..., "qty", "landed_krw"}
 
 def save_channels(conn, product_id, run_id, channels, purchase_mode=None):
     """2번 results.json의 channels(구매 사이트 순위)를 product_channels에 저장한다. 저장한 행 수를 돌려준다.

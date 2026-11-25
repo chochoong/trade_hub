@@ -453,7 +453,73 @@ def change_sig_json(conn):
 
 # 공급처 목록을 나눌 구매 방식 (product_suppliers.purchase_mode). 대시보드 버튼은 retail·small_batch만 실행
 PURCHASE_GROUPS = [("retail", "구매대행"), ("small_batch", "소량 사입"), ("oem", "대량 사입·OEM"), (None, "구매 방식 미기록")]
-SUPPLIER_HEADS = ["", "공급처", "신뢰도·점수", "상태", "MOQ", "단가", "연락처", "위험 요소"]
+SUPPLIER_HEADS = ["", "공급처", "신뢰도·점수", "상태", "MOQ", "단가", "쿠팡 권장가", "스마트스토어 권장가", "연락처", "위험 요소"]
+CHANNEL_COLS = (("coupang", "쿠팡"), ("smartstore", "스마트스토어"))   # product_suppliers.channel_prices_json 키 (4번이 씀)
+
+
+def naver_context():
+    """공급처 표 스마트스토어 칸의 [네이버 최저가 보기 ↗]·사람이 적은 최저가 — buyagent naver_low 그대로 (크롤링 없음).
+    {"nl": 모듈 또는 None, "by_hub": {허브 품목 번호: buyagent 상품 행}, "lows": {...}, "days": 30}"""
+    try:
+        data = buying.load()
+    except Exception:
+        return {"nl": None, "by_hub": {}, "lows": {}, "days": 30}
+    by_hub = {}
+    for r in data.get("products") or []:
+        h = buying._hub_id(r)
+        if h is not None:
+            by_hub.setdefault(h, r)
+    return {"nl": data.get("naver_low"), "by_hub": by_hub, "lows": data.get("naver_lows") or {},
+            "days": data.get("naver_days") or 30}
+
+
+def _naver_kw(p):
+    try:
+        kws = json.loads(p["keywords_ko_json"]) if p["keywords_ko_json"] else []
+    except (ValueError, TypeError):
+        kws = []
+    return (kws[0] if isinstance(kws, list) and kws and isinstance(kws[0], str) else "") or p["name"]
+
+
+def channel_cells(s, p, ctx):
+    """공급처 줄의 쿠팡·스마트스토어 권장가 (4번 channel_prices_json — 원가 기준 계산값, 시장 가격 아님).
+    스마트스토어 칸 아래 네이버 최저가 링크 + (buyagent에 사람이 적은 최저가가 있으면) 권장가 비교."""
+    try:
+        cp = json.loads(_field(s, "channel_prices_json") or "null")
+    except (ValueError, TypeError):
+        cp = None
+    cp = cp if isinstance(cp, dict) else {}
+    retail = p["est_retail_krw"]
+    basis = []
+    if isinstance(cp.get("landed_krw"), (int, float)):
+        basis.append(f'원가 {cp["landed_krw"]:,.0f}원')
+    if isinstance(cp.get("qty"), (int, float)):
+        basis.append(f'{cp["qty"]:,.0f}개 기준')
+    cells = []
+    for key, label in CHANNEL_COLS:
+        m = cp.get(key) if isinstance(cp.get(key), dict) else {}
+        t, w = m.get("target_krw"), m.get("walk_krw")
+        if not isinstance(t, (int, float)):
+            cell = '<span class="muted" title="4번 원가 계산 전">–</span>'
+        else:
+            tip = f"{label} 목표 마진 판매가 (4번 계산값 · 시장 가격 아님)" + (
+                f" · 최소 마진 판매가 {w:,.0f}원" if isinstance(w, (int, float)) else "") + (
+                f" · 계산 {str(cp.get('updated_at'))[:16]}" if cp.get("updated_at") else "")
+            cell = f'<b title="{e(tip)}">{t:,.0f}원</b>'
+            if basis:
+                cell += f'<div class="small muted">{" · ".join(basis)}</div>'
+            if isinstance(retail, (int, float)) and retail:
+                d = (t - retail) / retail
+                cell += (f'<div class="small" title="1번 예상 판매가 {retail:,.0f}원">1번 판매가보다 '
+                         + (f'<span class="warn">{d:.0%} 높음</span>' if d > 0.005 else
+                            f'<span class="ok">{-d:.0%} 낮음</span>' if d < -0.005 else "같음") + "</div>")
+        if key == "smartstore" and ctx.get("nl"):
+            nl, row = ctx["nl"], ctx["by_hub"].get(p["id"])
+            kw = nl.link_keyword(row) if row else _naver_kw(p)
+            st = nl.status(ctx["lows"].get((row.get("id") or "").strip()), ctx["days"]) if row else None
+            cell += buying.naver_cell({"naver_low": nl}, kw, st, t if isinstance(t, (int, float)) else None)
+        cells.append(cell)
+    return cells
 
 
 def sourcing_report(conn, product_id, mode):
@@ -483,7 +549,7 @@ def _md(at):
     return f"{at[5:7]}/{at[8:10]}" if at and len(at) >= 10 else ""
 
 
-def supplier_row(s, report_html, ranks, latest_run=None):
+def supplier_row(s, report_html, ranks, latest_run=None, p=None, ctx=None):
     """latest_run = 이 구매 방식 그룹의 최신 2번 실행 번호 — 그보다 예전 조사에서 나온 줄은 조사 날짜를 흐리게."""
     rank = ranks.get(s["link_id"])
     at = _field(s, "ps_researched_at")
@@ -507,6 +573,7 @@ def supplier_row(s, report_html, ranks, latest_run=None):
         f'<span class="trust t{e(s["trust"])}">{e(s["trust"] or "–")}</span> <span class="small">{e(supplier_score(s))}</span>'
         + (f'<div class="small">{clip(reason, 60)}</div>' if reason else "") + seen,
         e(s["status"]), f'{moq_badge(s)}<div>{clip(s["moq"], 30)}</div>', clip(s["price_note"] or num(s["unit_price_usd"], "${:g}"), 50),
+        *(channel_cells(s, p, ctx or {}) if p is not None else ["", ""]),
         contact or '<span class="muted">–</span>',
         clip(s["red_flags"], 50),
     ]
@@ -518,11 +585,12 @@ def products_in_progress(conn):
     if not prods:
         return '<p class="empty">진행 중인 품목 없음 — <code>trade_hub select &lt;번호&gt;</code>로 후보를 넘기세요</p>', 0
     cards = []
+    ctx = naver_context()
     for p in prods:
         sups = conn.execute("""
             SELECT s.*, ps.id AS link_id, ps.image_url AS sup_image, ps.status, ps.is_top_pick, ps.moq, ps.price_note, ps.unit_price_usd, ps.run_id,
                    ps.score AS ps_score, ps.grade AS ps_grade, ps.purchase_mode AS ps_mode, ps.max_order_qty AS ps_max_qty,
-                   COALESCE(ar.finished_at, ar.started_at) AS ps_researched_at
+                   ps.channel_prices_json, COALESCE(ar.finished_at, ar.started_at) AS ps_researched_at
             FROM product_suppliers ps JOIN suppliers s ON s.id = ps.supplier_id
             LEFT JOIN agent_runs ar ON ar.id = ps.run_id   -- 조사 날짜 = 그 줄을 만든 2번 실행 (ps.updated_at은 다른 에이전트도 바꿈)
             WHERE ps.product_id = ? ORDER BY ps.is_top_pick DESC, ps.id""", (p["id"],)).fetchall()
@@ -537,7 +605,7 @@ def products_in_progress(conn):
             rep = link(report_html, "리포트") if report_html else ""
             dated = [s for s in groups[mode] if s["ps_researched_at"] and s["run_id"] is not None]
             latest = max(dated, key=lambda s: (s["ps_researched_at"], s["run_id"])) if dated else None
-            rows = [supplier_row(s, report_html, ranks, latest["run_id"] if latest else None) for s in groups[mode]]
+            rows = [supplier_row(s, report_html, ranks, latest["run_id"] if latest else None, p, ctx) for s in groups[mode]]
             when = (f' <span class="muted small" title="이 구매 방식 최신 2번 조사 {e(latest["ps_researched_at"][:16])} · 실행 #{latest["run_id"]}">'
                     f'· 최근 조사 {_md(latest["ps_researched_at"])}</span>' if latest else "")
             blocks.append(f"""<div class="ps-group"><h3 class="ps-mode">{e(label)} <span class="muted small">{len(rows)}곳</span>{when}
@@ -687,7 +755,8 @@ table{border-collapse:collapse;width:100%}th,td{padding:7px 8px;border-bottom:1p
 th{font-size:12px;color:var(--muted);font-weight:600;white-space:nowrap}tr:last-child td{border-bottom:0}
 table.tight td{padding:6px 8px}
 table.sup td:nth-child(3),table.sup th:nth-child(3){min-width:200px}   /* 2번 공급처 표: 신뢰도·점수 */
-table.sup td:nth-child(6),table.sup th:nth-child(6){min-width:140px}   /* 단가 (price_note 변형 이름까지) */
+table.sup td:nth-child(6),table.sup th:nth-child(6){min-width:140px}
+table.sup td:nth-child(7),table.sup th:nth-child(7),table.sup td:nth-child(8),table.sup th:nth-child(8){min-width:130px}   /* 단가 (price_note 변형 이름까지) */
 .score{font-size:16px;color:var(--accent)}.up{color:var(--ok)}.down{color:var(--bad)}
 .ok{color:var(--ok)}.bad{color:var(--bad)}.warn{color:var(--warn)}
 .pri{display:inline-block;width:20px;height:20px;border-radius:50%;text-align:center;font-size:12px;line-height:20px;color:#fff}
