@@ -387,6 +387,9 @@ def test_costing_page_shows_supplier_and_listing_links(conn):
     with conn:
         conn.execute("UPDATE products SET notes = '[변형 혼합] #66·#67로 나눔' WHERE id = ?", (pid,))
     assert "-80% 변형 혼합" in dashboard.costing_rows(conn)
+    with conn:                                                   # 2번이 나뉜 품목으로 옮긴 줄 → 원가 표에서 빠짐
+        conn.execute("UPDATE product_suppliers SET status = 'rejected', reject_reason = '→ #66으로 옮김' WHERE id = ?", (ps,))
+    assert "Koi ZH Store" not in dashboard.costing_rows(conn)
 
 
 def test_competitive_evidence_skipped_for_listing_link_and_shown_as_badge(conn):

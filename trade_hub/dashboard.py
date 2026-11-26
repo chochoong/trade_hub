@@ -1383,7 +1383,7 @@ def costing_rows(conn):
                                   ps.est_margin_pct, p.est_retail_krw, s.country, s.url, ps.evidence_json,
                                   ps.is_top_pick, ps.status, ps.trade_terms_json, p.notes AS product_notes
                            FROM product_suppliers ps JOIN products p ON p.id = ps.product_id JOIN suppliers s ON s.id = ps.supplier_id
-                           WHERE ps.est_landed_krw IS NOT NULL
+                           WHERE ps.est_landed_krw IS NOT NULL AND ps.status != 'rejected'   -- 제외·옮긴 줄 (4번도 계산 안 함)
                            ORDER BY MAX(ps.est_margin_pct) OVER (PARTITION BY p.id) DESC NULLS LAST, p.id,
                                     ps.est_margin_pct DESC NULLS LAST, ps.id""").fetchall()   # 품목별로 묶음 (마진 좋은 품목 먼저)
     rep = costing_report_dir(conn)
